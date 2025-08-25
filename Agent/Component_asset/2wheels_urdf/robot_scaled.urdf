@@ -1,0 +1,91 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="2wheels_urdf">
+    
+    <link name="body">
+        <inertial>
+            <origin xyz="0.1875 0.1269215 0.11262049999999998" rpy="0 0 0" />
+            <mass value="279.8425" />
+            <inertia ixx="6.438218750000001" ixy="1.401553125e-06" ixz="2.0218937500000002e-07" iyy="4.70909375" iyz="-0.89878125" izz="7.9485624999999995" />
+        </inertial>
+        
+        <visual>
+            <origin xyz="0.0 0.0 0.0" rpy="0 -0 0" />
+            <geometry>
+                <mesh filename="assets/body.stl" scale="5 5 5" />
+            </geometry>
+            <material name="body_material">
+                <color rgba="0.8 0.8 0.8 1.0" />
+            </material>
+        </visual>
+        <collision>
+            <origin xyz="0.0 0.0 0.0" rpy="0 -0 0" />
+            <geometry>
+                <mesh filename="assets/body.stl" scale="5 5 5" />
+            </geometry>
+        </collision>
+    </link>
+    
+    <link name="wheel">
+        <inertial>
+            <origin xyz="0.0 1.7347249999999997e-17 -0.02" rpy="0 0 0" />
+            <mass value="41.927375000000005" />
+            <inertia ixx="0.5448968750000001" ixy="0.0" ixz="0.0" iyy="0.5448968750000001" iyz="0.0" izz="1.07905625" />
+        </inertial>
+        
+        <visual>
+            <origin xyz="-0.1625 0.125 -0.1" rpy="1.5708 1.5708 0" />
+            <geometry>
+                <mesh filename="assets/wheel.stl" scale="5 5 5" />
+            </geometry>
+            <material name="wheel_material">
+                <color rgba="0.262745 0.282353 0.301961 1.0" />
+            </material>
+        </visual>
+        <collision>
+            <origin xyz="-0.1625 0.125 -0.1" rpy="1.5708 1.5708 0" />
+            <geometry>
+                <mesh filename="assets/wheel.stl" scale="5 5 5" />
+            </geometry>
+        </collision>
+    </link>
+    
+    <joint name="wheel1_speed" type="continuous">
+        <origin xyz="-0.1 0.1625 0.125" rpy="-1.5708 -0 1.5708" />
+        <parent link="body" />
+        <child link="wheel" />
+        <axis xyz="0 0 1" />
+        <limit effort="100" velocity="50" />
+    </joint>
+    
+    <link name="wheel_2">
+        <inertial>
+            <origin xyz="3.469445e-17 1.7347249999999997e-17 0.02" rpy="0 0 0" />
+            <mass value="41.927375000000005" />
+            <inertia ixx="0.5448968750000001" ixy="0.0" ixz="0.0" iyy="0.5448968750000001" iyz="0.0" izz="1.07905625" />
+        </inertial>
+        
+        <visual>
+            <origin xyz="-0.1625 0.125 -0.06" rpy="1.5708 1.5708 0" />
+            <geometry>
+                <mesh filename="assets/wheel.stl" scale="5 5 5" />
+            </geometry>
+            <material name="wheel_2_material">
+                <color rgba="0.262745 0.282353 0.301961 1.0" />
+            </material>
+        </visual>
+        <collision>
+            <origin xyz="-0.1625 0.125 -0.06" rpy="1.5708 1.5708 0" />
+            <geometry>
+                <mesh filename="assets/wheel.stl" scale="5 5 5" />
+            </geometry>
+        </collision>
+    </link>
+    
+    <joint name="wheel2_speed" type="continuous">
+        <origin xyz="0.475 0.1625 0.125" rpy="-1.5708 -0 1.5708" />
+        <parent link="body" />
+        <child link="wheel_2" />
+        <axis xyz="0 0 1" />
+        <limit effort="100" velocity="50" />
+    </joint>
+</robot>

@@ -1,0 +1,55 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="wheel_only">
+    <link name="wheel">
+        <inertial>
+            <origin xyz="0.0 1.7347249999999997e-17 -0.02" rpy="0 0 0" />
+            <mass value="0.001" />
+            <!-- <mass value="41.927375000000005" /> -->
+            <inertia ixx="0.5448968750000001" ixy="0.0" ixz="0.0" iyy="0.5448968750000001" iyz="0.0" izz="1.07905625" />
+        </inertial>
+        <visual>
+            <origin xyz="-0.1625 0.125 -0.1" rpy="1.5708 1.5708 0" />
+            <geometry>
+                <mesh filename="assets/wheel.stl" scale="5 5 5" />
+            </geometry>
+            <material name="wheel_material">
+                <color rgba="0.262745 0.282353 0.301961 1.0" />
+            </material>
+        </visual>
+        <collision>
+            <origin xyz="-0.1625 0.125 -0.1" rpy="1.5708 1.5708 0" />
+            <geometry>
+                <mesh filename="assets/wheel.stl" scale="5 5 5" />
+            </geometry>
+        </collision>
+    </link>
+
+    <link name="cylinder">
+        <inertial>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <mass value="0.005"/>
+            <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.02"/>
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <cylinder radius="0.03" length="0.03"/>
+            </geometry>
+            <material name="cylinder_material">
+                <color rgba="0.8 0.2 0.2 1.0"/>
+            </material>
+        </visual>
+        <collision>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <cylinder radius="0.03" length="0.03"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <joint name="wheel_to_cylinder" type="fixed">
+        <parent link="wheel"/>
+        <child link="cylinder"/>
+        <origin xyz="0 0 0.015" rpy="0 0 0"/>
+    </joint>
+</robot>

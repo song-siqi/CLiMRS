@@ -1,0 +1,44 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="body_box_cylinder">
+    <link name="body">
+        <inertial>
+            <origin xyz="0 0 0.129" rpy="0 0 0" />
+            <mass value="0.001" />
+            <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01" />
+        </inertial>
+
+        <!-- 加厚后的长方体 -->
+        <!-- <visual>
+            <origin xyz="0 0 0.09" rpy="0 0 0" />
+            <geometry>
+                <box size="0.375 0.2538 0.18" />
+            </geometry>
+            <material name="body_box_material">
+                <color rgba="0.8 0.8 0.8 1.0" />
+            </material>
+        </visual>
+        <collision>
+            <origin xyz="0 0 0.09" rpy="0 0 0" />
+            <geometry>
+                <box size="0.375 0.2538 0.18" />
+            </geometry>
+        </collision> -->
+
+        <!-- 圆柱体，直径0.03，底面紧贴box顶面 -->
+        <!-- <visual>
+            <origin xyz="0 0 0.195" rpy="0 0 0" />
+            <geometry>
+                <cylinder radius="0.04" length="0.05" />
+            </geometry>
+            <material name="body_cylinder_material">
+                <color rgba="0.2 0.6 0.8 1.0" />
+            </material>
+        </visual>
+        <collision>
+            <origin xyz="0 0 0.195" rpy="0 0 0" />
+            <geometry>
+                <cylinder radius="0.015" length="0.05" />
+            </geometry>
+        </collision> -->
+    </link>
+</robot>

@@ -1,0 +1,28 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="body_only_robot">
+    
+    <link name="body">
+        <inertial>
+            <origin xyz="0.1875 0.1269215 0.11262049999999998" rpy="0 0 0" />
+            <mass value="279.8425" />
+            <inertia ixx="6.438218750000001" ixy="1.401553125e-06" ixz="2.0218937500000002e-07" iyy="4.70909375" iyz="-0.89878125" izz="7.9485624999999995" />
+        </inertial>
+        
+        <visual>
+            <origin xyz="0.0 0.0 0.0" rpy="0 -0 0" />
+            <geometry>
+                <mesh filename="package://assets/body.stl" scale="5 5 5" />
+            </geometry>
+            <material name="body_material">
+                <color rgba="0.8 0.8 0.8 1.0" />
+            </material>
+        </visual>
+        <collision>
+            <origin xyz="0.0 0.0 0.0" rpy="0 -0 0" />
+            <geometry>
+                <mesh filename="package://assets/body.stl" scale="5 5 5" />
+            </geometry>
+        </collision>
+    </link>
+    
+</robot>

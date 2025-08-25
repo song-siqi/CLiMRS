@@ -1,0 +1,2754 @@
+import os
+import json
+import torch
+import random
+from tqdm import tqdm
+import numpy as np
+from isaacgym import gymapi, gymtorch
+from isaacgym.torch_utils import *
+from isaacgym.torch_utils import quat_rotate
+import requests
+import json
+import env.tasks.humanoid_amp_task as humanoid_amp_task
+from utils import torch_utils
+import re
+import math
+from scipy.spatial.transform import Rotation as R, Slerp
+from controllers.franka_osc_controller import FrankaOSCController
+from controllers.kinematics import FrankaIKGym
+# from car_control import DifferentialDriveController
+from controllers.DiffIK import DiffIK
+import toppra as ta
+from controllers.topp import Topp
+
+# TODO:
+# 3. 单LLM做多决策
+# 4. LLM prompt
+# 缩短小车的物块宽度
+
+class Pose:
+    def __init__(self, pos, quat):
+        self.pos = np.array(pos)
+        self.quat = np.array(quat)
+
+def slerp(q0, q1, t):
+    key_rots = R.from_quat([q0, q1])
+    slerp_obj = Slerp([0, 1], key_rots)
+    return slerp_obj([t]).as_quat()[0]
+
+def interpolate(start: Pose, end: Pose, step_size: float = None, num_steps: int = None):
+    path = []
+    for i in range(num_steps + 1):
+        t = i / num_steps
+        pos = (1 - t) * start.pos + t * end.pos
+        quat = slerp(start.quat, end.quat, t)
+        path.append(Pose(pos, quat))
+    return path
+
+def convert_wz(w: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+    if not (w.shape == z.shape):
+        raise ValueError("w 和 z 的形状必须相同")
+    # 对于绕Z轴的旋转，x 和 y 分量为0，z 分量是 sin(angle/2)，w 分量是 cos(angle/2)
+    quat_x = torch.zeros_like(z)
+    quat_y = torch.zeros_like(z)
+    return torch.stack([quat_x, quat_y, z, w], dim=-1)
+
+class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
+    def __init__(self, cfg, sim_params, physics_engine, device_type, device_id, headless):
+        self.API_URL = "https://api.claudeshop.top"  # 替换为你的 API URL
+        self.API_KEY = "sk-8Ya7RPGO6cwJWVtzKXLqHtzHMzO3Ax8FnsmGSER6dPqeNKD3"  # 替换为你的 API 密钥
+        self.current_wp_idx = 0
+        self.current_wp_idx_2 = 0
+        self.current_wp_idx_3 = 0
+        self.next_wp_idx = 0
+
+        self.num_envs = cfg["env"]["numEnvs"]
+        # franka完成任务的次数计数器
+        self.franka_counter = 0
+        self.franka_count = 0
+        self.absorbed = 0
+
+        self._box_dist_min = 0.5
+        self._box_dist_max = 5
+        self._target_dist_min = 1.5
+        self._target_dist_max = 5
+
+        # scaling object size
+        self._box_min_scale = 1.0
+        self._box_max_scale = 1.0
+        self.scaling_factor = self._box_min_scale + \
+            (self._box_max_scale - self._box_min_scale) * \
+            torch.rand(self.num_envs)
+
+        # scaling object weight
+        self._box_min_weight = 0.8
+        self._box_max_weight = 0.8
+        self.scaling_factor_weight = self._box_min_weight + \
+            (self._box_max_weight - self._box_min_weight) * \
+            torch.rand(self.num_envs)
+
+        self._default_box_width_size = 0.5
+        self._default_box_length_size = 0.5
+        self._default_box_height_size = 0.5
+
+        self.obs_add_noise = True
+        self.noise_level = 0.1
+        
+        device = torch.device(
+            "cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+        self._width_box_size = torch.zeros(self.num_envs).to(device)
+        self._length_box_size = torch.zeros(self.num_envs).to(device)
+        self._height_box_size = torch.zeros(self.num_envs).to(device)
+        # 这个应该是按频率调用LLM
+        self.target_position = torch.tensor([1.0, 7.5]).to(device)
+
+        # 计算当前位置到tar的矢量方向，假设模是0.01
+        self.update_pos = torch.tensor([0.02,0.02]).to(device)
+
+        self.is_ask_llm = False
+
+
+        self.controller = FrankaOSCController()
+        urdf_path = "franka/asset/franka_description/robots/franka_panda.urdf"
+        self.ik_solver = FrankaIKGym(urdf_path)
+        self.planner = Topp(
+            dof=7,
+            qc_vel=0.8,
+            qc_acc=0.8,
+            ik=self.ik_solver.solve
+        )
+        self.franka_task_stage = 0
+        self.franka_path = None
+        self.franka_path_step = 0
+        self.franka_gripper_target = None
+        self.franka_gripper_steps = 0
+        self.franka_gripper_max_steps = 0
+        self.gripper_closed = False
+        self.control_step_counter = 0
+        self.wait_counter = 0
+
+        self.robot_wheel_speed = 30.0
+        self.robot_target_reached_threshold = 0.1
+        self.robot_orientation_speed = 8.0
+
+        super().__init__(cfg=cfg,
+                         sim_params=sim_params,
+                         physics_engine=physics_engine,
+                         device_type=device_type,
+                         device_id=device_id,
+                         headless=headless)
+        self.wait_steps = int(1.0 / self.dt)
+        self.spacing = cfg["env"]['envSpacing']
+        self.reset_time = 0
+        self.log_success = False
+
+        if cfg['env']['eval_mode']:
+            # for calculate success rate and distance error and execution time
+            self.log_success = True
+            self._distance_to_target = [
+                [] for _ in range(self.num_envs)]
+            self.log_success_rate = []
+            self.log_success_precision = []
+
+        if cfg['env']['save_motions']:
+            self.save_motion_for_blender = False
+            self._save_all_state = True
+            self.record_frame_number = 600
+
+            self.output_dict = {}
+            self.output_dict['trans'] = np.zeros(
+                [self.record_frame_number, 15, 3])
+            self.output_dict['rot'] = np.zeros(
+                [self.record_frame_number, 15, 4])
+            self.output_dict['obj_pos'] = np.zeros(
+                [self.record_frame_number, 3])
+            self.output_dict['obj_rot'] = np.zeros(
+                [self.record_frame_number, 4])
+
+            if self._save_all_state:
+                self.output_dict['root_pos'] = np.zeros(
+                    [self.record_frame_number, 3])
+                self.output_dict['root_rot'] = np.zeros(
+                    [self.record_frame_number, 4])
+                self.output_dict['dof_pos'] = np.zeros(
+                    [self.record_frame_number, 28])
+        self.record_step = 0
+
+        width_half_size = self._width_box_size / 2.0
+        length_half_size = self._length_box_size / 2.0
+        height_half_size = self._height_box_size / 2.0
+
+        lfus = torch.stack(
+            [-length_half_size, width_half_size, height_half_size], dim=1)
+        lfds = torch.stack(
+            [-length_half_size, width_half_size, -height_half_size], dim=1)
+        lbus = torch.stack(
+            [-length_half_size, -width_half_size, height_half_size], dim=1)
+        lbds = torch.stack(
+            [-length_half_size, -width_half_size, -height_half_size], dim=1)
+        rfus = torch.stack(
+            [length_half_size, width_half_size, height_half_size], dim=1)
+        rfds = torch.stack(
+            [length_half_size, width_half_size, -height_half_size], dim=1)
+        rbus = torch.stack(
+            [length_half_size, -width_half_size, height_half_size], dim=1)
+        rbds = torch.stack(
+            [length_half_size, -width_half_size, -height_half_size], dim=1)
+
+        stand_points_left = torch.stack(
+            [-length_half_size - 0.2, torch.zeros(self.num_envs).to(device), torch.zeros(self.num_envs).to(device)], dim=1)
+        stand_points_right = torch.stack(
+            [length_half_size + 0.2, torch.zeros(self.num_envs).to(device), torch.zeros(self.num_envs).to(device)], dim=1)
+        held_points_left = torch.stack(
+            [-length_half_size + width_half_size, torch.zeros(self.num_envs).to(device), torch.zeros(self.num_envs).to(device)], dim=1)
+        held_points_right = torch.stack(
+            [length_half_size - width_half_size, torch.zeros(self.num_envs).to(device), torch.zeros(self.num_envs).to(device)], dim=1)
+
+        self.box_bps = torch.stack(
+            [lfus, lfds, lbus, lbds, rfus, rfds, rbus, rbds], dim=0)
+
+        self.stand_held_points_offset = torch.stack(
+            [stand_points_left, stand_points_right, held_points_left, held_points_right], dim=0)
+
+        self._prev_root_pos = torch.zeros(
+            [self.num_envs, 3], device=self.device, dtype=torch.float)
+        self._prev_box_pos = torch.zeros(
+            [self.num_envs, 3], device=self.device, dtype=torch.float)
+
+        lift_body_names = cfg["env"]["liftBodyNames"]
+        self._lift_body_ids = self._build_lift_body_ids_tensor(lift_body_names)
+
+        self._build_box_tensors()
+        self._build_target_state_tensors()
+        self._reset_target([0])
+
+    def ask_llm(self,question):
+        headers = {
+        'Accept': 'application/json',
+        'Authorization': f'Bearer {self.API_KEY}',
+        'User-Agent':'Apifox/1.0.0(https://apifox.com)',
+        'Content-Type': 'application/json'
+    }
+        prompt = """你可以解决一下我遇到的机器人决策问题吗？ {} 
+                                现在请你一步一步的完成上面的问题，把答案填到下面的框内， \\boxed{{answer}},作为你的最终答案."""
+        
+        payload = json.dumps({
+        "model":"o1-mini",
+        "messages": [
+            {"role": "user", "content": prompt.format(question)}
+        ]
+    })
+        url = self.API_URL + "/v1/chat/completions"
+
+        try:
+            response = requests.post(url, headers=headers, data=payload)
+            response = response.json()
+            return response.get("choices", [])[0].get("message", {}).get("content", "")
+            # response.raise_for_status()  # 检查是否有错误
+            # result = response.json()  # 解析返回的 JSON 数据
+            # return result.get("choices")[0].get("text", "").strip()  # 获取模型返回的文本
+        except Exception as e:
+            return f"Error: {e}"
+        
+    def _build_lift_body_ids_tensor(self, lift_body_names):
+        env_ptr = self.envs[0]
+        actor_handle = self.humanoid_handles[0]
+        body_ids = []
+
+        for body_name in lift_body_names:
+            body_id = self.gym.find_actor_rigid_body_handle(
+                env_ptr, actor_handle, body_name)
+            assert (body_id != -1)
+            body_ids.append(body_id)
+
+        body_ids = to_torch(body_ids, device=self.device, dtype=torch.long)
+        return body_ids
+
+    def _create_envs(self, num_envs, spacing, num_per_row):
+        self._box_asset = []
+        self.obstacle_asset = []
+        self.obstacle_asset2 = []
+        self.obstacle_asset3 = []
+        self.obstacle_asset4 = []
+        self.obs_asset1 = []
+        self.obs_asset2 = []
+        self.obs_asset3 = []
+        self.obs_asset4 = []
+        self.obs_box1 = []
+        self.obs_box2 = []
+        self.obs_box3 = []
+        self.obs_component = []
+
+        self._box_handles = []
+        self.franka_handles = []
+        self.franka_hand_indices = []
+        self.table_handles = []
+        self.franka_body_handles = []
+        self.franka_cube_handles = []
+        self.component_handles = []
+        self.component_cube_handles = []
+        self.franka_cylinder_rb_idxs = []
+        self.car_handles = []
+        self.franka_cube_size = 0.04
+        
+        self._load_box_asset()
+        self._load_obstacle()
+
+        super()._create_envs(num_envs, spacing, num_per_row)
+        self.prepare_tensors()
+        return
+
+# 构建实际盒子，构建零件对应的物块
+    def _load_box_asset(self):
+        width_box_size = self._default_box_width_size
+        length_box_size = self._default_box_length_size
+        height_box_size = self._default_box_height_size
+
+        
+        self.asset_density = torch.zeros(self.num_envs).to(self.device)
+
+        for env_id in range(self.num_envs):
+            scaling_factor_l = self.scaling_factor[env_id]
+            scaling_factor_w = self.scaling_factor[env_id]
+            scaling_factor_h = self.scaling_factor[env_id]
+            scaling_factor_weight = self.scaling_factor_weight[env_id]
+
+            box_length = scaling_factor_l * length_box_size
+            box_width = scaling_factor_w * width_box_size
+            box_height = scaling_factor_h * height_box_size
+
+            asset_options = gymapi.AssetOptions()
+            asset_options.density = scaling_factor_weight * 50.0 / \
+                (scaling_factor_l * scaling_factor_w * scaling_factor_h)
+            self.asset_density[env_id] = asset_options.density
+
+            self.obs_box1.append(self.gym.create_box(
+                self.sim, box_length, box_width, box_height, asset_options))
+            self.obs_box2.append(self.gym.create_box(
+                self.sim, box_length, box_width, box_height, asset_options))
+            self.obs_box3.append(self.gym.create_box(
+                self.sim, box_length, box_width, box_height, asset_options))
+            
+            self.obs_component.append(self.gym.create_box(
+                self.sim, 0.6, 0.5, box_height-0.2, asset_options))
+            
+        return
+
+# 构建障碍物
+    def _load_obstacle(self):
+        width_box_size = self._default_box_width_size * 2
+        length_box_size = self._default_box_length_size *2
+        height_box_size = self._default_box_height_size
+
+        for env_id in range(self.num_envs):
+            box_length =  length_box_size
+            box_width = width_box_size
+            box_height = height_box_size
+
+            asset_options = gymapi.AssetOptions()
+
+            self.obstacle_asset.append(self.gym.create_box(
+                self.sim, box_length, box_width*22, box_height, asset_options))
+            self.obstacle_asset2.append(self.gym.create_box(
+                self.sim, box_length, box_width*22, box_height, asset_options))
+            self.obstacle_asset3.append(self.gym.create_box(
+                self.sim, box_length*13, box_width, box_height, asset_options))
+            self.obstacle_asset4.append(self.gym.create_box(
+                self.sim, box_length*13, box_width, box_height, asset_options))
+            
+            self.obs_asset1.append(self.gym.create_box(
+                self.sim, box_length*5.0, box_width*0.25, box_height, asset_options))
+            self.obs_asset2.append(self.gym.create_box(
+                self.sim, box_length*5.0, box_width*0.25, box_height, asset_options))
+            self.obs_asset3.append(self.gym.create_box(
+                self.sim, box_length*0.25, box_width*5.0, box_height, asset_options))
+            self.obs_asset4.append(self.gym.create_box(
+                self.sim, box_length*0.25, box_width*5.0, box_height, asset_options))
+
+        return
+
+    def _build_env(self, env_id, env_ptr, humanoid_asset):
+        super()._build_env(env_id, env_ptr, humanoid_asset)
+        self._build_box(env_id, env_ptr)
+        self._reset_components(env_id, env_ptr)
+        self._build_franka(env_id, env_ptr)
+        self._build_franka_table(env_id, env_ptr)
+        self._build_franka_body(env_id, env_ptr)
+        self._build_left_table(env_id, env_ptr)
+        self._build_franka_cube(env_id, env_ptr)
+        self._build_mobile_robots_cube(env_id, env_ptr)
+        self._build_mobile_robots_cube2(env_id, env_ptr)
+        self._build_mobile_robots_body(env_id, env_ptr)
+        # 下方轮子零件、下方主体零件和上方轮子零件
+        self._build_mobile_robots(env_id, env_ptr)
+        self._build_mobile_robots_2(env_id, env_ptr)
+        self._build_mobile_robots_3(env_id, env_ptr)
+        
+        return
+
+# box位置实体（应该和实物对齐），添加实体
+    def _build_box(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+
+        default_pose = gymapi.Transform()
+        default_pose.p.x = 3.0
+
+        default_pose2 = gymapi.Transform()
+        default_pose2.p.x = -7.0
+        default_pose2.p.y = 0.0
+        default_pose2.p.z = 0.25
+
+        default_pose3 = gymapi.Transform()
+        default_pose3.p.x = 7.0
+        default_pose3.p.y = 0.0
+        default_pose3.p.z = 0.25
+
+        default_pose4 = gymapi.Transform()
+        default_pose4.p.x = 0.0
+        default_pose4.p.y = 10.5
+        default_pose4.p.z = 0.25
+
+        default_pose5 = gymapi.Transform()
+        default_pose5.p.x = 0.0
+        default_pose5.p.y = -10.5
+        default_pose5.p.z = 0.25
+
+        default_pose6 = gymapi.Transform()
+        default_pose6.p.x = 4.0
+        default_pose6.p.y = 6.0
+        default_pose6.p.z = 0.25
+
+        default_pose7 = gymapi.Transform()
+        default_pose7.p.x = -4.0
+        default_pose7.p.y = -6.0
+        default_pose7.p.z = 0.25
+
+        default_pose8 = gymapi.Transform()
+        default_pose8.p.x = -3.0
+        default_pose8.p.y = 7.5
+        default_pose8.p.z = 0.25
+
+        default_pose9 = gymapi.Transform()
+        default_pose9.p.x = 3.0
+        default_pose9.p.y = -7.5
+        default_pose9.p.z = 0.25
+
+        default_pose10 = gymapi.Transform()
+        default_pose10.p.x = 0.5
+        default_pose10.p.y = 6.0
+        default_pose10.p.z = 0.25
+
+        default_pose11 = gymapi.Transform()
+        default_pose11.p.x = -0.5
+        default_pose11.p.y = 6.0
+        default_pose11.p.z = 0.25
+
+        default_pose12 = gymapi.Transform()
+        default_pose12.p.x = -1.5
+        default_pose12.p.y = 6.0
+        default_pose12.p.z = 0.25
+
+        # import pdb; pdb.set_trace()
+        # 都是1.0
+        scaling_factor_l = self.scaling_factor[env_id]
+        scaling_factor_w = self.scaling_factor[env_id]
+        scaling_factor_h = self.scaling_factor[env_id]
+        # import pdb; pdb.set_trace()
+
+        self._width_box_size[env_id] = scaling_factor_w * \
+            self._default_box_width_size
+        self._length_box_size[env_id] = scaling_factor_l * \
+            self._default_box_length_size
+        self._height_box_size[env_id] = scaling_factor_h * \
+            self._default_box_height_size
+
+        # box_handle = self.gym.create_actor(
+        #     env_ptr, self._box_asset[env_id], default_pose, "box", col_group, col_filter, segmentation_id)
+        obs_box_handle = self.gym.create_actor(
+            env_ptr, self.obs_box1[env_id], default_pose10, "box", col_group, col_filter, segmentation_id)
+        obs_box_handle2 = self.gym.create_actor(
+            env_ptr, self.obs_box2[env_id], default_pose11, "box", col_group, col_filter, segmentation_id)
+        obs_box_handle3 = self.gym.create_actor(
+            env_ptr, self.obs_box3[env_id], default_pose12, "box", col_group, col_filter, segmentation_id)
+        
+        
+        box_handle2 = self.gym.create_actor(
+            env_ptr, self.obstacle_asset[env_id], default_pose2, "cube", col_group, col_filter, segmentation_id)
+        box_handle3 = self.gym.create_actor(
+            env_ptr, self.obstacle_asset2[env_id], default_pose3, "cube", col_group, col_filter, segmentation_id)
+        box_handle4 = self.gym.create_actor(
+            env_ptr, self.obstacle_asset3[env_id], default_pose4, "cube", col_group, col_filter, segmentation_id)
+        box_handle5 = self.gym.create_actor(
+            env_ptr, self.obstacle_asset4[env_id], default_pose5, "cube", col_group, col_filter, segmentation_id)
+        box_handle6 = self.gym.create_actor(
+            env_ptr, self.obs_asset1[env_id], default_pose6, "cube", col_group, col_filter, segmentation_id)
+        box_handle7 = self.gym.create_actor(
+            env_ptr, self.obs_asset2[env_id], default_pose7, "cube", col_group, col_filter, segmentation_id)
+        box_handle8 = self.gym.create_actor(
+            env_ptr, self.obs_asset3[env_id], default_pose8, "cube", col_group, col_filter, segmentation_id)
+        box_handle9 = self.gym.create_actor(
+            env_ptr, self.obs_asset4[env_id], default_pose9, "cube", col_group, col_filter, segmentation_id)
+
+        props = self.gym.get_actor_dof_properties(env_ptr, obs_box_handle)
+        props['friction'].fill(5.0)
+        self.gym.set_actor_dof_properties(env_ptr, obs_box_handle, props)
+        self._box_handles.append(obs_box_handle)
+        self._box_handles.append(box_handle2)
+        self._box_handles.append(box_handle3)
+        self._box_handles.append(box_handle4)
+        self._box_handles.append(box_handle5)
+        self._box_handles.append(box_handle6)
+        self._box_handles.append(box_handle7)
+        self._box_handles.append(box_handle8)
+        self._box_handles.append(box_handle9)
+        # self._box_handles.append(obs_box_handle)
+        self._box_handles.append(obs_box_handle2)
+        self._box_handles.append(obs_box_handle3)
+
+        return
+    
+    def _build_target_state_tensors(self):
+        self._target_pos = torch.zeros(self.num_envs, 3).to(self.device)
+        self._target_rot = torch.zeros(self.num_envs, 4).to(self.device)
+        self.tar_standing_points = torch.zeros(
+            self.num_envs, 3).to(self.device)
+        self.tar_held_points = torch.zeros(
+            self.num_envs, 3).to(self.device)
+        return
+
+    def _build_box_tensors(self):
+        num_actors = self.get_num_actors_per_env()
+        # 现在的box states1
+        self._box_states = self._root_states.view(
+            self.num_envs, num_actors, self._root_states.shape[-1])[..., 1, :]
+        
+        self.box_standing_points = torch.zeros(
+            self.num_envs, 3).to(self.device)
+        self.box_held_points = torch.zeros(
+            self.num_envs, 3).to(self.device)
+        self._box_actor_ids = to_torch(
+            num_actors * np.arange(self.num_envs), device=self.device, dtype=torch.int32) + 1
+        self._box_pos = self._box_states[..., :3]
+        bodies_per_env = self._rigid_body_state.shape[0] // self.num_envs
+        contact_force_tensor = self.gym.acquire_net_contact_force_tensor(
+            self.sim)
+        contact_force_tensor = gymtorch.wrap_tensor(contact_force_tensor)
+        self._box_contact_forces = contact_force_tensor.view(
+            self.num_envs, bodies_per_env, 3)[..., self.num_bodies, :]
+        
+    def _build_box_tensors_2(self):
+        num_actors = self.get_num_actors_per_env()
+        # 现在的box states1
+        # import pdb; pdb.set_trace()
+        self._box_states = self._root_states.view(
+            self.num_envs, num_actors, self._root_states.shape[-1])[..., 2, :]
+        
+        self.box_standing_points = torch.zeros(
+            self.num_envs, 3).to(self.device)
+        self.box_held_points = torch.zeros(
+            self.num_envs, 3).to(self.device)
+        self._box_actor_ids = to_torch(
+            num_actors * np.arange(self.num_envs), device=self.device, dtype=torch.int32) + 1
+        self._box_pos = self._box_states[..., :3]
+        bodies_per_env = self._rigid_body_state.shape[0] // self.num_envs
+        contact_force_tensor = self.gym.acquire_net_contact_force_tensor(
+            self.sim)
+        contact_force_tensor = gymtorch.wrap_tensor(contact_force_tensor)
+        self._box_contact_forces = contact_force_tensor.view(
+            self.num_envs, bodies_per_env, 3)[..., self.num_bodies, :]
+
+    def _reset_actors(self, env_ids):
+        super()._reset_actors(env_ids)
+        self._reset_box(env_ids)
+        # self._reset_target(env_ids)
+        self._reset_car_target(env_ids)
+        self._reset_car_target2(env_ids)
+        self._reset_car_target3(env_ids)
+        return
+
+    # 给出盒子id
+    def _reset_box(self, env_ids):
+
+        rand_theta = 2 * np.pi *torch.tensor(0.25,device=self._box_states.device)
+
+        axis = torch.tensor(
+            [0.0, 0.0, 1.0], dtype=self._box_states.dtype, device=self._box_states.device)
+        rand_rot = quat_from_angle_axis(rand_theta, axis)
+        self._box_states[env_ids, 3:7] = rand_rot
+        self._box_states[env_ids, 7:] = 0.0
+        return
+    
+    # 需要搬运的零件位置(物块)
+    def _reset_components(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        default_pose.p.x = 4.0
+        default_pose.p.y = 8.0
+        default_pose.p.z = 0.25
+
+        component_handle = self.gym.create_actor(
+            env_ptr, self.obs_component[env_id], default_pose, "wheel_1", col_group, col_filter, segmentation_id)
+        self._box_handles.append(component_handle)
+    
+        return
+
+    ################## 护城河 ##################
+
+    # franka的位置
+    def _build_franka(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        default_pose.p.x = -0.05
+        default_pose.p.y = -3.0
+        default_pose.p.z = 0.0
+        asset_options = gymapi.AssetOptions()
+
+        asset_root = "franka/asset" 
+        asset_file = "franka_description/robots/franka_panda.urdf"  
+        asset_options.armature = 0.01
+        asset_options.fix_base_link = True
+        asset_options.disable_gravity = True
+        asset_options.flip_visual_attachments = True
+
+        franka_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
+        franka_dof_props = self.gym.get_asset_dof_properties(franka_asset)
+        franka_lower_limits = franka_dof_props['lower']
+        franka_upper_limits = franka_dof_props['upper']
+        franka_mids = 0.3 * (franka_upper_limits + franka_lower_limits)
+        franka_num_dofs = self.gym.get_asset_dof_count(franka_asset)
+
+        franka_dof_props["driveMode"][:7].fill(gymapi.DOF_MODE_EFFORT)
+        franka_dof_props["stiffness"][:7].fill(0.0)
+        franka_dof_props["damping"][:7].fill(0.0)
+        franka_dof_props["driveMode"][7:].fill(gymapi.DOF_MODE_POS)
+        franka_dof_props["stiffness"][7:].fill(800.0)
+        franka_dof_props["damping"][7:].fill(40.0)
+
+        default_dof_pos = np.zeros(franka_num_dofs, dtype=np.float32)
+        default_dof_pos[:7] = franka_mids[:7]
+        default_dof_pos[7:] = franka_upper_limits[7:]
+        default_dof_state = np.zeros(franka_num_dofs, gymapi.DofState.dtype)
+        default_dof_state["pos"] = default_dof_pos
+
+        franka_handle = self.gym.create_actor(env_ptr, franka_asset, default_pose, "franka_panda", col_group, col_filter, segmentation_id)
+        self.franka_handles.append(franka_handle)
+
+        self.gym.set_actor_dof_properties(env_ptr, franka_handle, franka_dof_props)
+        self.gym.set_actor_dof_states(env_ptr, franka_handle, default_dof_state, gymapi.STATE_ALL)
+        self.gym.set_actor_dof_position_targets(env_ptr, franka_handle, default_dof_pos)
+
+        franka_link_dict = self.gym.get_asset_rigid_body_dict(franka_asset)
+        self.franka_hand_index = franka_link_dict["panda_hand"]
+        self.franka_hand_indices.append(self.franka_hand_index)
+        self.franka_dof_props = franka_dof_props
+        self.franka_default_dof_pos = default_dof_pos
+        self.franka_default_dof_state = default_dof_state
+        return
+
+    # 机械臂所在的桌面，现在为无穷远
+    def _build_franka_table(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        table_dims = gymapi.Vec3(0.6, 1.2, 0.3)
+        default_pose.p.x = 0.45
+        default_pose.p.y = -30.4
+        default_pose.p.z = 0.5 * table_dims.z
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        asset_options.disable_gravity = False
+        
+        table_asset = self.gym.create_box(self.sim, table_dims.x, table_dims.y, table_dims.z, asset_options)
+        table_handle = self.gym.create_actor(env_ptr, table_asset, default_pose, "table", col_group, col_filter, segmentation_id)
+        self.table_handles.append(table_handle)
+        return
+    
+    def _build_franka_body(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        table_dims = gymapi.Vec3(0.6, 1.2, 0.3)
+        self.franka_cube_size = 0.45
+        default_pose.p.x = 0.45
+        default_pose.p.y = -3.0
+        default_pose.p.z = table_dims.z - 0.1
+        default_pose.r = gymapi.Quat.from_euler_zyx(0, 0, 0)
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.disable_gravity = False
+        asset_options.fix_base_link = True
+
+        asset_root = "2wheels_urdf"
+        asset_file = "body.urdf"
+        body_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
+        
+        body_handle = self.gym.create_actor(env_ptr, body_asset, default_pose, "wheel_body", col_group, col_filter, segmentation_id)
+        body_rb_idx = self.gym.get_actor_rigid_body_index(env_ptr, body_handle, 0, gymapi.DOMAIN_SIM)
+        self.franka_body_handles.append(body_handle)
+        
+        props = self.gym.get_actor_rigid_shape_properties(env_ptr, body_handle)
+        for p in props:
+            p.friction = 2.0
+        self.gym.set_actor_rigid_shape_properties(env_ptr, body_handle, props)
+
+        return
+
+    # 机械臂侧面的桌面，现在为无穷远
+    def _build_left_table(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        table_dims = gymapi.Vec3(0.5, 1.7, 0.3)
+        default_pose.p.x = -50
+        default_pose.p.y = -1.4
+        default_pose.p.z = 0.5 * table_dims.z
+        default_pose.r = gymapi.Quat.from_euler_zyx(0, 0, np.pi/2)
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        asset_options.disable_gravity = False
+
+        table_asset = self.gym.create_box(self.sim, table_dims.x, table_dims.y, table_dims.z, asset_options)
+        table_handle = self.gym.create_actor(env_ptr, table_asset, default_pose, "left_table", col_group, col_filter, segmentation_id)
+        self.table_handles.append(table_handle)
+        return
+
+    # 侧面桌面上的零件，现在为无穷远
+    def _build_franka_cube(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        table_dims = gymapi.Vec3(0.5, 1.7, 0.3)
+        self.franka_cube_size = 0.04
+        default_pose.p.x = -50
+        default_pose.p.y = -1.4
+        default_pose.p.z = table_dims.z + 0.5 * self.franka_cube_size
+        default_pose.r = gymapi.Quat.from_euler_zyx(0, 0, -np.pi)
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.disable_gravity = False
+        asset_options.fix_base_link = False
+
+        asset_root = "2wheels_urdf"
+        asset_file = "wheel_only.urdf"
+        wheel_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
+        
+        wheel_handle = self.gym.create_actor(env_ptr, wheel_asset, default_pose, "franka_wheel", col_group, col_filter, segmentation_id)
+        wheel_rb_idx = self.gym.get_actor_rigid_body_index(env_ptr, wheel_handle, 0, gymapi.DOMAIN_SIM)
+        self.franka_cube_handles.append(wheel_handle)
+        
+        cylinder_rb_idx = self.gym.find_actor_rigid_body_handle(env_ptr, wheel_handle, "cylinder")
+        self.franka_cylinder_rb_idxs.append(cylinder_rb_idx)
+        
+        props = self.gym.get_actor_rigid_shape_properties(env_ptr, wheel_handle)
+        for p in props:
+            p.friction = 2.0
+        self.gym.set_actor_rigid_shape_properties(env_ptr, wheel_handle, props)
+
+        return
+    
+    # 创建机器人零件躯干以及轮子对应的方块
+    def _build_mobile_robots_body(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        self.franka_cube_size = 0.5
+        default_pose.p.x = 4.0
+        default_pose.p.y = -8.5
+        default_pose.p.z = 1.0 
+        # default_pose.r = gymapi.Quat.from_euler_zyx(0, np.pi, np.pi)
+
+        default_pose2 = gymapi.Transform()
+        default_pose2.p.x = -4.0
+        default_pose2.p.y = -8.0
+        default_pose2.p.z = 0.25
+
+        default_pose3 = gymapi.Transform()
+        default_pose3.p.x = 4.0
+        default_pose3.p.y = -8.0
+        default_pose3.p.z = 0.25
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.disable_gravity = False
+        asset_options.fix_base_link = False
+
+        asset_root = "Omni.SLDASM"
+        asset_file = "Omni.urdf"
+        wheel_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
+
+        self.wheel2 = self.gym.create_box(
+                self.sim, 0.6, 0.45, 0.3, asset_options)
+        self.body_cube = self.gym.create_box(
+                self.sim, 0.6, 0.3, 0.3, asset_options)
+        
+        component_cube_handle = self.gym.create_actor(
+            env_ptr, self.wheel2, default_pose2, "wheel_2", col_group, col_filter, segmentation_id)
+        component_cube_handle2 = self.gym.create_actor(
+            env_ptr, self.body_cube, default_pose3, "robot_body", col_group, col_filter, segmentation_id)
+        
+        wheel_handle = self.gym.create_actor(env_ptr, wheel_asset, default_pose, "franka_body", col_group, col_filter, segmentation_id)
+
+        self.component_handles.append(wheel_handle)
+        self.component_cube_handles.append(component_cube_handle)
+        self.component_cube_handles.append(component_cube_handle2)
+        
+        cylinder_rb_idx = self.gym.find_actor_rigid_body_handle(env_ptr, wheel_handle, "cylinder")
+        self.franka_cylinder_rb_idxs.append(cylinder_rb_idx)
+        
+        props = self.gym.get_actor_rigid_shape_properties(env_ptr, wheel_handle)
+        for p in props:
+            p.friction = 2.0
+        self.gym.set_actor_rigid_shape_properties(env_ptr, wheel_handle, props)
+
+        return
+
+    # 创建机器人第二个轮子
+    def _build_mobile_robots_cube2(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        table_dims = gymapi.Vec3(0.5, 1.7, 0.4)
+        self.franka_cube_size = 0.04
+        default_pose.p.x = -4.0
+        default_pose.p.y = -8.0
+        default_pose.p.z = table_dims.z + 0.5 * self.franka_cube_size
+        default_pose.r = gymapi.Quat.from_euler_zyx(0, 0, -np.pi)
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.disable_gravity = False
+        asset_options.fix_base_link = False
+
+        asset_root = "2wheels_urdf"
+        asset_file = "wheel_only.urdf"
+        wheel_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
+        
+        wheel_handle = self.gym.create_actor(env_ptr, wheel_asset, default_pose, "franka_wheel2", col_group, col_filter, segmentation_id)
+        # wheel_rb_idx = self.gym.get_actor_rigid_body_index(env_ptr, wheel_handle, 0, gymapi.DOMAIN_SIM)
+        self.component_handles.append(wheel_handle)
+        
+        cylinder_rb_idx = self.gym.find_actor_rigid_body_handle(env_ptr, wheel_handle, "cylinder")
+        self.franka_cylinder_rb_idxs.append(cylinder_rb_idx)
+        
+        props = self.gym.get_actor_rigid_shape_properties(env_ptr, wheel_handle)
+        for p in props:
+            p.friction = 2.0
+        self.gym.set_actor_rigid_shape_properties(env_ptr, wheel_handle, props)
+
+        return
+    
+    # 创建机器人第一个轮子
+    def _build_mobile_robots_cube(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        table_dims = gymapi.Vec3(0.5, 1.7, 0.5)
+        self.franka_cube_size = 0.04
+        default_pose.p.x = 4.0
+        default_pose.p.y = 8.0
+        default_pose.p.z = table_dims.z 
+        default_pose.r = gymapi.Quat.from_euler_zyx(0, 0, -np.pi)
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.disable_gravity = True
+        asset_options.fix_base_link = False
+
+        asset_root = "2wheels_urdf"
+        asset_file = "wheel_only.urdf"
+        wheel_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
+        
+        wheel_handle = self.gym.create_actor(env_ptr, wheel_asset, default_pose, "franka_wheel", col_group, col_filter, segmentation_id)
+        # wheel_rb_idx = self.gym.get_actor_rigid_body_index(env_ptr, wheel_handle, 0, gymapi.DOMAIN_SIM)
+        self.component_handles.append(wheel_handle)
+        
+        cylinder_rb_idx = self.gym.find_actor_rigid_body_handle(env_ptr, wheel_handle, "cylinder")
+        self.franka_cylinder_rb_idxs.append(cylinder_rb_idx)
+        
+        props = self.gym.get_actor_rigid_shape_properties(env_ptr, wheel_handle)
+        for p in props:
+            p.friction = 2.0
+        self.gym.set_actor_rigid_shape_properties(env_ptr, wheel_handle, props)
+
+        return
+    
+    def prepare_tensors(self):
+        _dof_states = self.gym.acquire_dof_state_tensor(self.sim)
+        self.dof_states = gymtorch.wrap_tensor(_dof_states)
+
+        franka_dof_start = self.gym.get_actor_dof_index(self.envs[0], self.franka_handles[0], 0, gymapi.DOMAIN_SIM)
+        franka_dof_end = franka_dof_start + self.gym.get_actor_dof_count(self.envs[0], self.franka_handles[0])
+        self.franka_dof_states = self.dof_states[franka_dof_start:franka_dof_end]
+        
+        self.franka_dof_pos = self.franka_dof_states[:, 0]
+        self.franka_dof_vel = self.franka_dof_states[:, 1]
+
+        if hasattr(self, '_box_handles') and len(self._box_handles) > 0:
+            # 获取最后一个机器人（主要控制的机器人）的DOF状态
+            robot_handle = self._box_handles[-1]  # 假设最后一个是主要机器人
+            self.robot_dof_start = self.gym.get_actor_dof_index(self.envs[0], robot_handle, 0, gymapi.DOMAIN_SIM)
+            self.robot_dof_count = self.gym.get_actor_dof_count(self.envs[0], robot_handle)
+            
+            if self.robot_dof_count > 0:
+                self.robot_dof_states = self.dof_states[self.robot_dof_start:self.robot_dof_start + self.robot_dof_count]
+
+
+        _rb_states = self.gym.acquire_rigid_body_state_tensor(self.sim)
+        _rb_states = gymtorch.wrap_tensor(_rb_states)
+        self.franka_rb_states = _rb_states[franka_dof_start:franka_dof_end]
+
+        _jacobian = self.gym.acquire_jacobian_tensor(self.sim, "franka_panda")
+        self.franka_jacobian = gymtorch.wrap_tensor(_jacobian)
+        self.j_eef = self.franka_jacobian[:, self.franka_hand_index - 1, :]
+
+        _massmatrix = self.gym.acquire_mass_matrix_tensor(self.sim, "franka_panda")
+        self.mm = gymtorch.wrap_tensor(_massmatrix)
+
+        self.franka_hand_restart = torch.full([self.num_envs], False, dtype=torch.bool).to(self.device)
+        self.franka_pos_action = torch.zeros_like(self.franka_dof_pos).squeeze(-1)
+        self.franka_effort_action = torch.zeros_like(self.franka_pos_action)
+
+        return self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm
+    
+    #磁吸逻辑,component_handles是零件，box_handles是对应的方块。
+    def keep_cube_attached_to_box(self):
+        if not self.component_handles or not self._box_handles:
+            return
+        
+        #找到 handle 调用即可
+        env_ptr = self.envs[0]
+        # 轮子+轮子零件的id
+        cube_handle = self.component_handles[0]
+        box_handle = self._box_handles[-2]
+
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        root_state = gymtorch.wrap_tensor(root_state)
+
+        cube_root_idx = self.gym.get_actor_index(env_ptr, cube_handle, gymapi.DOMAIN_SIM)
+        box_root_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
+
+        box_pos = root_state[box_root_idx, 0:3]
+        box_quat = root_state[box_root_idx, 3:7]
+
+        box_quat = box_quat.unsqueeze(0)
+        offset = torch.tensor([0.0, 0.0, 0.2], device=box_pos.device).unsqueeze(0)
+        offset_world = quat_rotate(box_quat, offset).squeeze(0)
+        target_cube_pos = box_pos + offset_world
+        target_cube_quat = box_quat.squeeze(0)
+
+        current_cube_pos = root_state[cube_root_idx, 0:3]
+        current_cube_quat = root_state[cube_root_idx, 3:7]
+        alpha = 0.8
+        new_cube_pos = alpha * target_cube_pos + (1 - alpha) * current_cube_pos
+        new_cube_quat = slerp(current_cube_quat.cpu().numpy(), target_cube_quat.cpu().numpy(), alpha)
+
+        root_state[cube_root_idx, 0:3] = new_cube_pos
+        root_state[cube_root_idx, 3:7] = torch.tensor(new_cube_quat, device=box_pos.device)
+
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
+    
+    def keep_cube_attached_to_box_2(self):
+        if not self.component_handles or not self.component_cube_handles:
+            return
+        env_ptr = self.envs[0]
+        cube_handle = self.component_handles[2]
+        box_handle = self.component_cube_handles[1]
+
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        root_state = gymtorch.wrap_tensor(root_state)
+
+        cube_root_idx = self.gym.get_actor_index(env_ptr, cube_handle, gymapi.DOMAIN_SIM)
+        box_root_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
+        box_pos = root_state[box_root_idx, 0:3]
+        box_quat = root_state[box_root_idx, 3:7]
+        offset = torch.tensor([-0.05, 0.0, 0.2], device=box_pos.device).unsqueeze(0)   #new
+        # offset = torch.tensor([0.1, -0.19, 0.2], device=box_pos.device).unsqueeze(0)
+        box_quat_unsq = box_quat.unsqueeze(0)
+        offset_world = quat_rotate(box_quat_unsq, offset).squeeze(0)
+        target_cube_pos = box_pos + offset_world
+
+        current_cube_pos = root_state[cube_root_idx, 0:3]
+        alpha = 0.6
+        new_cube_pos = alpha * target_cube_pos + (1 - alpha) * current_cube_pos
+
+        root_state[cube_root_idx, 0:3] = new_cube_pos
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
+    
+    def keep_cube_attached_to_box_3(self):
+        if not self.component_handles or not self.component_cube_handles:
+            return
+        #找到 handle 调用即可
+        env_ptr = self.envs[0]
+        # 轮子+轮子零件的id
+        cube_handle = self.component_handles[1]
+        box_handle = self.component_cube_handles[0]
+
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        root_state = gymtorch.wrap_tensor(root_state)
+
+        cube_root_idx = self.gym.get_actor_index(env_ptr, cube_handle, gymapi.DOMAIN_SIM)
+        box_root_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
+
+        box_pos = root_state[box_root_idx, 0:3]
+        box_quat = root_state[box_root_idx, 3:7]
+
+        box_quat = box_quat.unsqueeze(0)
+        offset = torch.tensor([0.0, 0.0, 0.2], device=box_pos.device).unsqueeze(0)
+        offset_world = quat_rotate(box_quat, offset).squeeze(0)
+        target_cube_pos = box_pos + offset_world
+        target_cube_quat = box_quat.squeeze(0)
+
+        current_cube_pos = root_state[cube_root_idx, 0:3]
+        current_cube_quat = root_state[cube_root_idx, 3:7]
+        alpha = 0.8
+        new_cube_pos = alpha * target_cube_pos + (1 - alpha) * current_cube_pos
+        new_cube_quat = slerp(current_cube_quat.cpu().numpy(), target_cube_quat.cpu().numpy(), alpha)
+
+        root_state[cube_root_idx, 0:3] = new_cube_pos
+        root_state[cube_root_idx, 3:7] = torch.tensor(new_cube_quat, device=box_pos.device)
+
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
+
+    def fix_component_2_quat(self):
+        env_ptr = self.envs[0]
+        handle = self.component_handles[2]
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        root_state = gymtorch.wrap_tensor(root_state)
+        idx = self.gym.get_actor_index(env_ptr, handle, gymapi.DOMAIN_SIM)
+        # root_state[idx, 3:7] = torch.tensor([0.0, -0.11, 0.0, 1.0], device=root_state.device, dtype=root_state.dtype)
+        # root_state[idx, 3:7] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=root_state.device, dtype=root_state.dtype)
+        root_state[idx, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=root_state.device, dtype=root_state.dtype)
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))       
+    
+    # define take and place   
+    def close_gripper(self):
+        if self.franka_gripper_target is not None and self.franka_gripper_steps < self.franka_gripper_max_steps:
+            # all_targets = self.dof_states[:, 0].clone()
+            all_tensor = self.pd_tar[0]
+            for i, env in enumerate(self.envs):
+                franka_dof_start = self.gym.get_actor_dof_index(env, self.franka_handles[i], 0, gymapi.DOMAIN_SIM)
+                all_tensor[franka_dof_start+7] = self.franka_gripper_target
+                all_tensor[franka_dof_start+8] = self.franka_gripper_target
+            self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(all_tensor))
+
+    def path_follow(self, pose):
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        self.gym.refresh_dof_state_tensor(self.sim)
+        self.gym.refresh_jacobian_tensors(self.sim)
+        self.gym.refresh_mass_matrix_tensors(self.sim)
+        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+
+        pos_cur = self.franka_rb_states[self.franka_hand_index, :3].unsqueeze(0)
+        orn_cur = self.franka_rb_states[self.franka_hand_index, 3:7].unsqueeze(0)
+        dof_vel = self.franka_dof_states[:, 1].reshape(len(self.envs), 9, 1)
+        pos_des = torch.from_numpy(pose.pos.astype(np.float32)).unsqueeze(0).to(self.device)
+        orn_des = torch.from_numpy(pose.quat.astype(np.float32)).unsqueeze(0).to(self.device)
+
+        u, gripper_targets = self.controller.solve(
+            pos_cur, orn_cur, dof_vel, pos_des, orn_des,
+            self.j_eef, self.mm, cube_pos=None
+        )
+        u[:, 7:] = 0
+
+        if self.gripper_closed:
+            gripper_targets[:] = 0.01  
+        else:
+            gripper_targets[:] = 0.04
+
+        total_dofs = self.dof_states.shape[0]
+        all_u = torch.zeros(total_dofs, device=u.device, dtype=u.dtype)
+        franka_dof_start = self.gym.get_actor_dof_index(self.envs[0], self.franka_handles[0], 0, gymapi.DOMAIN_SIM)
+        franka_dof_end = franka_dof_start + self.gym.get_actor_dof_count(self.envs[0], self.franka_handles[0])
+        all_u[franka_dof_start:franka_dof_end] = u[0]  
+        self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(all_u))
+        
+        # all_targets = self.dof_states[:, 0].clone()
+        all_tensor = self.pd_tar[0]
+        # import pdb; pdb.set_trace()
+        for i, env in enumerate(self.envs):
+            franka_dof_start = self.gym.get_actor_dof_index(env, self.franka_handles[i], 0, gymapi.DOMAIN_SIM)
+            all_tensor[franka_dof_start+7] = gripper_targets[i].item()
+            all_tensor[franka_dof_start+8] = gripper_targets[i].item()
+        self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(all_tensor))
+        
+    def set_franka_path(self, path , duration=150.0):
+        self.franka_path = path
+        self.franka_path_time = 0.0
+        self.franka_path_num = len(path)
+        self.franka_path_duration = duration  
+
+    def _step_franka_path(self, step_scale = 65 , gap = 5.0 , dist_gap = 0.02):
+        if hasattr(self, 'franka_path') and self.franka_path_time < self.franka_path_duration:
+            idx = int(self.franka_path_time * (self.franka_path_num - 1) / self.franka_path_duration)
+            idx = min(idx, self.franka_path_num - 1)
+            pose = self.franka_path[idx]
+            self.path_follow(pose)
+            self.franka_path_time += self.dt * step_scale
+
+            self.gym.refresh_rigid_body_state_tensor(self.sim)
+            cur_pos = self.franka_rb_states[self.franka_hand_index, :3].cpu().numpy()
+            target_pos = self.franka_path[-1].pos
+            dist = np.linalg.norm(cur_pos - target_pos)
+            weight = np.array([1.0, 1.0, 0.2])
+            dist = np.linalg.norm((cur_pos - target_pos) * weight)
+
+            # print(f"cur_pos: {cur_pos}, target_pos: {target_pos}, dist: {dist}, time: {self.franka_path_time}/{self.franka_path_duration}")
+            if dist < dist_gap:
+                return True
+            if self.franka_path_time >= self.franka_path_duration:
+                self.franka_path_duration += gap  
+            return False
+        return True
+            
+    def _step_franka_gripper(self, close=True):
+        if close:
+            self.franka_gripper_target = 0.01
+        else:
+            self.franka_gripper_target = 0.04
+        if self.franka_gripper_steps < 5:
+            self.close_gripper()
+            self.franka_gripper_steps += 1
+            return False
+        else:
+            self.franka_gripper_steps = 0
+            return True
+
+    def apply_magnetic_force(self):
+        if not self.franka_cube_handles or not self.franka_body_handles:
+            return
+        env_ptr = self.envs[0]
+        wheel_handle = self.component_handles[0]
+        body_handle = self.component_handles[2]
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        cube_root_idx = self.gym.get_actor_index(self.envs[0], wheel_handle, gymapi.DOMAIN_SIM)
+        cube_state_tensor = all_root_state[cube_root_idx]
+        body_rb_idx = self.gym.get_actor_index(self.envs[0], body_handle, gymapi.DOMAIN_SIM)
+        body_state_tensor = all_root_state[body_rb_idx]
+        wheel_pos = cube_state_tensor[0:3].unsqueeze(0).cpu().numpy()
+        body_pos = body_state_tensor[0:3].unsqueeze(0).cpu().numpy()+ np.array([0.0, 0.146, 0.0]) 
+        diff = body_pos - wheel_pos
+        dist = np.linalg.norm(diff)
+        # print(f"[磁吸调试] 轮子位置: {wheel_pos}, body位置: {body_pos}, 距离: {dist:.4f}")
+        magnet_range = 0.2863
+
+        if dist < magnet_range:
+            root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+            root_state = gymtorch.wrap_tensor(root_state)
+            wheel_root_idx = self.gym.get_actor_index(env_ptr, wheel_handle, gymapi.DOMAIN_SIM)
+            
+            root_state[wheel_root_idx, 0:3] = torch.tensor(body_pos, device=root_state.device, dtype=root_state.dtype)
+            cube_quat = np.array([-0.707, 0.0, 0.0, 0.707])
+            root_state[wheel_root_idx, 3:7] = torch.tensor(cube_quat, device=root_state.device, dtype=root_state.dtype)
+
+            self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
+            # print("[磁吸调试] 已吸附 wheel 到 body 圆柱体上表面")
+            return True
+        else:
+            return False
+
+    # path planning
+    def _plan_franka_path_to_pre_grasp(self):
+        print("Calling _plan_franka_path_to_pre_grasp")
+        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        
+        cube_handle = self.component_handles[0]
+        cube_root_idx = self.gym.get_actor_index(self.envs[0], cube_handle, gymapi.DOMAIN_SIM)
+        cube_state_tensor = all_root_state[cube_root_idx]
+
+        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long,device=self.device)
+        cur_pos = self.franka_rb_states[hand_idxs, :3]
+        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
+        
+        self.franka_init_pos = cur_pos[0].cpu().numpy().copy()
+        self.franka_init_quat = cur_orn[0].cpu().numpy().copy()
+
+        cube_pos = cube_state_tensor[0:3].unsqueeze(0)
+        cube_quat = np.array([1.0, 0.0, 0.0, 0.0])
+
+        pre_cube_pos = cube_pos + torch.tensor([0.0, -0.04, 0.15], device=cube_pos.device, dtype=cube_pos.dtype)
+        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
+        end_pose = Pose(pre_cube_pos[0].cpu().numpy(), cube_quat)
+        
+        path = interpolate(start_pose, end_pose, num_steps=50)
+        self.set_franka_path(path, duration=50.0)  
+
+    def _plan_franka_path_to_grasp(self):
+        print("Calling _plan_franka_path_to_grasp")
+        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        cube_handle = self.component_handles[0]
+        cube_root_idx = self.gym.get_actor_index(self.envs[0], cube_handle, gymapi.DOMAIN_SIM)
+        cube_state_tensor = all_root_state[cube_root_idx]
+        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long,device=self.device)
+        cur_pos = self.franka_rb_states[hand_idxs, :3]
+        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
+        cube_pos = cube_state_tensor[0:3].unsqueeze(0)
+        cube_quat = np.array([1.0, 0.0, 0.0, 0.0])
+        cube_pos = cube_pos + torch.tensor([0.0, -0.04, 0.02], device=cube_pos.device, dtype=cube_pos.dtype)
+        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
+        end_pose = Pose(cube_pos[0].cpu().numpy(), cube_quat)
+        path = interpolate(start_pose, end_pose, num_steps=10)
+        self.set_franka_path(path, duration=2.0)  
+
+    def _plan_franka_path_to_pre_place(self):
+        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long, device=self.device)
+        cur_pos = self.franka_rb_states[hand_idxs, :3]
+        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
+        env_ptr = self.envs[0]
+        body_handle = self.component_handles[2]
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
+
+        cube_quat = np.array([0.707, 0.0, 0.0, 0.707]) #左
+        # cube_quat = np.array([-0.707, 0.0, 0.0, 0.707]) #右
+        # place_pos = torch.tensor([0.72, -1.424, 0.23], device=self.device) 
+        # pre_place_pos = place_pos + torch.tensor([0.0, -0.04, 0.4], device=self.device) 
+        place_pos = all_root_state[body_root_idx, 0:3] 
+        pre_place_pos = place_pos + torch.tensor([-0.0, 0.25, 0.2], device=self.device)  
+
+        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
+        end_pose = Pose(pre_place_pos.cpu().numpy(), cube_quat)
+        path = interpolate(start_pose, end_pose, num_steps=120)
+        self.set_franka_path(path, duration=200.0)
+
+    def _plan_franka_path_to_place(self):
+        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long, device=self.device)
+        cur_pos = self.franka_rb_states[hand_idxs, :3]
+        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
+ 
+        env_ptr = self.envs[0]
+        body_handle = self.component_handles[2]
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
+        place_pos = all_root_state[body_root_idx, 0:3]+torch.tensor([0.0, 0.146, 0.0], device=self.device)
+        # place_pos = torch.tensor([0.51, -3.2, 0.42], device=self.device)  
+        cube_quat = np.array([0.707, 0.0, 0.0, 0.707])
+        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
+        end_pose = Pose(place_pos.cpu().numpy(), cube_quat)
+        path = interpolate(start_pose, end_pose, num_steps=20)
+        self.set_franka_path(path, duration=30.0)
+
+    def _plan_franka_path_to_lift(self):
+        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long, device=self.device)
+        cur_pos = self.franka_rb_states[hand_idxs, :3]
+        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
+
+        # lift_pos = cur_pos + torch.tensor([0.0, 0.0, 0.2], device=self.device) 
+        # lift_orn = cur_orn.clone() 
+        lift_pos = self.franka_init_pos
+        lift_orn = self.franka_init_quat 
+
+        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
+        # end_pose = Pose(lift_pos[0].cpu().numpy(), lift_orn[0].cpu().numpy())
+        end_pose = Pose(lift_pos, lift_orn)
+        path = interpolate(start_pose, end_pose, num_steps=20)  
+        self.set_franka_path(path,duration=20.0)
+
+    # action
+    def _franka_take_and_place_fsm(self):
+        print("FSM stage:", self.franka_task_stage)
+        if self.franka_task_stage == 0:
+            self._plan_franka_path_to_pre_grasp()
+            self.franka_task_stage = 1
+        elif self.franka_task_stage == 1:
+            finished = self._step_franka_path()
+            if finished:
+                self.franka_task_stage = 2
+        elif self.franka_task_stage == 2:
+            self._plan_franka_path_to_grasp()
+            self.franka_task_stage = 3
+        elif self.franka_task_stage == 3:
+            finished = self._step_franka_path(step_scale = 1, gap = 0.5, dist_gap = 0.0105)
+            if finished:
+                self.franka_task_stage = 4
+        elif self.franka_task_stage == 4:
+            finished = self._step_franka_gripper(close=True)
+            if finished:
+                self.gripper_closed = True
+                self.franka_task_stage = 4.5
+        elif self.franka_task_stage == 4.5:
+                self._plan_franka_path_to_pre_place()
+                self.franka_task_stage = 5
+        elif self.franka_task_stage == 5:
+            finished = self._step_franka_path(dist_gap = 0.0159)
+            if finished:
+                self.franka_task_stage = 6 
+        elif self.franka_task_stage == 6:
+            self._plan_franka_path_to_place()
+            self.franka_task_stage = 7
+        elif self.franka_task_stage == 7:
+            absorbed = self.apply_magnetic_force()
+            finished = self._step_franka_path(step_scale = 1, gap = 0.5, dist_gap = 0.01)
+            if absorbed or finished:
+                self.franka_task_stage = 8
+                self.absorbed = 1
+        elif self.franka_task_stage == 8:
+            finished = self._step_franka_gripper(close=False)
+            if finished:
+                self.gripper_closed = False
+                self.franka_task_stage = 9
+        elif self.franka_task_stage == 9:
+            self._plan_franka_path_to_lift()
+            self.franka_task_stage = 10
+        elif self.franka_task_stage == 10:
+            finished = self._step_franka_path()
+            if finished:
+                self.franka_count = 1
+                self.franka_task_stage = 11
+                if hasattr(self, 'franka_path') and self.franka_path:
+                    pose = self.franka_path[-1]
+                    self.path_follow(pose)
+        # elif self.franka_task_stage == 11:
+        #     self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
+            
+        def _plan_franka_path_to_pre_grasp(self):
+            print("Calling _plan_franka_path_to_pre_grasp")
+            self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+            self.gym.refresh_rigid_body_state_tensor(self.sim)
+            root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+            all_root_state = gymtorch.wrap_tensor(root_state)
+            
+            cube_handle = self.component_handles[0]
+            cube_root_idx = self.gym.get_actor_index(self.envs[0], cube_handle, gymapi.DOMAIN_SIM)
+            cube_state_tensor = all_root_state[cube_root_idx]
+
+            hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long,device=self.device)
+            cur_pos = self.franka_rb_states[hand_idxs, :3]
+            cur_orn = self.franka_rb_states[hand_idxs, 3:7]
+            
+            self.franka_init_pos = cur_pos[0].cpu().numpy().copy()
+            self.franka_init_quat = cur_orn[0].cpu().numpy().copy()
+
+            cube_pos = cube_state_tensor[0:3].unsqueeze(0)
+            cube_quat = np.array([1.0, 0.0, 0.0, 0.0])
+
+            pre_cube_pos = cube_pos + torch.tensor([0.0, -0.04, 0.15], device=cube_pos.device, dtype=cube_pos.dtype)
+            start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
+            end_pose = Pose(pre_cube_pos[0].cpu().numpy(), cube_quat)
+            
+            path = interpolate(start_pose, end_pose, num_steps=50)
+            self.set_franka_path(path, duration=50.0)  
+
+    def plan_franka_path_to_pre_grasp(self):
+        print("Calling _plan_franka_path_to_pre_grasp")
+        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        
+        cube_handle = self.component_handles[1]
+        cube_root_idx = self.gym.get_actor_index(self.envs[0], cube_handle, gymapi.DOMAIN_SIM)
+        cube_state_tensor = all_root_state[cube_root_idx]
+
+        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long,device=self.device)
+        cur_pos = self.franka_rb_states[hand_idxs, :3]
+        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
+        
+        self.franka_init_pos = cur_pos[0].cpu().numpy().copy()
+        self.franka_init_quat = cur_orn[0].cpu().numpy().copy()
+
+        cube_pos = cube_state_tensor[0:3].unsqueeze(0)
+        cube_quat = np.array([1.0, 0.0, 0.0, 0.0])
+
+        pre_cube_pos = cube_pos + torch.tensor([0.0, -0.04, 0.15], device=cube_pos.device, dtype=cube_pos.dtype)
+        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
+        end_pose = Pose(pre_cube_pos[0].cpu().numpy(), cube_quat)
+        
+        path = interpolate(start_pose, end_pose, num_steps=50)
+        self.set_franka_path(path, duration=50.0) 
+
+    def plan_franka_path_to_grasp(self):
+        print("Calling _plan_franka_path_to_grasp")
+        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        cube_handle = self.component_handles[0]
+        cube_root_idx = self.gym.get_actor_index(self.envs[0], cube_handle, gymapi.DOMAIN_SIM)
+        cube_state_tensor = all_root_state[cube_root_idx]
+        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long,device=self.device)
+        cur_pos = self.franka_rb_states[hand_idxs, :3]
+        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
+        cube_pos = cube_state_tensor[0:3].unsqueeze(0)
+        cube_quat = np.array([1.0, 0.0, 0.0, 0.0])
+        cube_pos = cube_pos + torch.tensor([0.0, -0.04, 0.02], device=cube_pos.device, dtype=cube_pos.dtype)
+        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
+        end_pose = Pose(cube_pos[0].cpu().numpy(), cube_quat)
+        path = interpolate(start_pose, end_pose, num_steps=10)
+        self.set_franka_path(path, duration=2.0)  
+
+    def plan_franka_path_to_pre_place(self):
+        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long, device=self.device)
+        cur_pos = self.franka_rb_states[hand_idxs, :3]
+        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
+        env_ptr = self.envs[0]
+        body_handle = self.component_handles[2]
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
+
+        cube_quat = np.array([0.707, 0.0, 0.0, 0.707]) #左
+        # cube_quat = np.array([-0.707, 0.0, 0.0, 0.707]) #右
+        # place_pos = torch.tensor([0.72, -1.424, 0.23], device=self.device) 
+        # pre_place_pos = place_pos + torch.tensor([0.0, -0.04, 0.4], device=self.device) 
+        place_pos = all_root_state[body_root_idx, 0:3] 
+        pre_place_pos = place_pos + torch.tensor([-0.0, 0.25, 0.2], device=self.device)  
+
+        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
+        end_pose = Pose(pre_place_pos.cpu().numpy(), cube_quat)
+        path = interpolate(start_pose, end_pose, num_steps=120)
+        self.set_franka_path(path, duration=200.0)
+
+    def plan_franka_path_to_place(self):
+        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long, device=self.device)
+        cur_pos = self.franka_rb_states[hand_idxs, :3]
+        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
+ 
+        env_ptr = self.envs[0]
+        body_handle = self.component_handles[2]
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
+        place_pos = all_root_state[body_root_idx, 0:3]+torch.tensor([0.0, 0.146, 0.0], device=self.device)
+        # place_pos = torch.tensor([0.51, -3.2, 0.42], device=self.device)  
+        cube_quat = np.array([0.707, 0.0, 0.0, 0.707])
+        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
+        end_pose = Pose(place_pos.cpu().numpy(), cube_quat)
+        path = interpolate(start_pose, end_pose, num_steps=20)
+        self.set_franka_path(path, duration=30.0)
+
+    def plan_franka_path_to_lift(self):
+        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long, device=self.device)
+        cur_pos = self.franka_rb_states[hand_idxs, :3]
+        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
+
+        # lift_pos = cur_pos + torch.tensor([0.0, 0.0, 0.2], device=self.device) 
+        # lift_orn = cur_orn.clone() 
+        lift_pos = self.franka_init_pos
+        lift_orn = self.franka_init_quat 
+
+        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
+        # end_pose = Pose(lift_pos[0].cpu().numpy(), lift_orn[0].cpu().numpy())
+        end_pose = Pose(lift_pos, lift_orn)
+        path = interpolate(start_pose, end_pose, num_steps=20)  
+        self.set_franka_path(path,duration=20.0)
+                
+    def _franka_take_and_place_fsm2(self):
+        print("FSM stage:", self.franka_task_stage)
+        if self.franka_task_stage == 0:
+            self.plan_franka_path_to_pre_grasp()
+            self.franka_task_stage = 1
+        elif self.franka_task_stage == 1:
+            finished = self._step_franka_path()
+            if finished:
+                self.franka_task_stage = 2
+                import pdb; pdb.set_trace()
+        elif self.franka_task_stage == 2:
+            self.plan_franka_path_to_grasp()
+            self.franka_task_stage = 3
+        elif self.franka_task_stage == 3:
+            finished = self._step_franka_path(step_scale = 1, gap = 0.5, dist_gap = 0.0105)
+            if finished:
+                self.franka_task_stage = 4
+        elif self.franka_task_stage == 4:
+            finished = self._step_franka_gripper(close=True)
+            if finished:
+                self.gripper_closed = True
+                self.franka_task_stage = 4.5
+        elif self.franka_task_stage == 4.5:
+                self.plan_franka_path_to_pre_place()
+                self.franka_task_stage = 5
+        elif self.franka_task_stage == 5:
+            finished = self._step_franka_path(dist_gap = 0.0159)
+            if finished:
+                self.franka_task_stage = 6 
+        elif self.franka_task_stage == 6:
+            self.plan_franka_path_to_place()
+            self.franka_task_stage = 7
+        elif self.franka_task_stage == 7:
+            absorbed = self.apply_magnetic_force()
+            finished = self._step_franka_path(step_scale = 1, gap = 0.5, dist_gap = 0.01)
+            if absorbed or finished:
+                self.franka_task_stage = 8
+        elif self.franka_task_stage == 8:
+            finished = self._step_franka_gripper(close=False)
+            if finished:
+                self.gripper_closed = False
+                self.franka_task_stage = 9
+        elif self.franka_task_stage == 9:
+            self.plan_franka_path_to_lift()
+            self.franka_task_stage = 10
+        elif self.franka_task_stage == 10:
+            finished = self._step_franka_path()
+            if finished:
+                self.franka_task_stage = 0 
+                
+
+    ################## 护城河 ##################
+
+    def _build_mobile_robots(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        default_pose.p.x = -2.0
+        default_pose.p.y = -2.0
+        default_pose.p.z = 0.25
+        asset_options = gymapi.AssetOptions()
+
+        asset_root = "2wheels_urdf"  # 资产文件夹路径
+        asset_file = "robot_scaled.urdf"  # 资产文件名（URDF或SDF文件
+
+        robot_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
+        car_actor_handle = self.gym.create_actor(env_ptr, robot_asset, default_pose, "mobile_robots", col_group, col_filter, segmentation_id)
+
+        robot_dof_props = self.gym.get_actor_dof_properties(env_ptr, car_actor_handle)
+        robot_dof_props["driveMode"].fill(gymapi.DOF_MODE_VEL)
+        robot_dof_props["stiffness"].fill(0.0)
+        robot_dof_props["damping"].fill(50.0)
+        robot_dof_props["friction"].fill(0.00) 
+        robot_dof_props["velocity"].fill(50.0) 
+        self.gym.set_actor_dof_properties(env_ptr, car_actor_handle, robot_dof_props)
+
+        self._box_handles.append(car_actor_handle)
+
+        return
+    
+    def _build_mobile_robots_2(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        default_pose.p.x = 2.0
+        default_pose.p.y = -2.0
+        default_pose.p.z = 0.25
+        asset_options = gymapi.AssetOptions()
+
+        asset_root = "2wheels_urdf"  # 资产文件夹路径
+        asset_file = "robot_scaled.urdf"  # 资产文件名（URDF或SDF文件
+
+        robot_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
+        car_actor_handle = self.gym.create_actor(env_ptr, robot_asset, default_pose, "mobile_robots2", col_group, col_filter, segmentation_id)
+
+        robot_dof_props = self.gym.get_actor_dof_properties(env_ptr, car_actor_handle)
+        robot_dof_props["driveMode"].fill(gymapi.DOF_MODE_VEL)
+        robot_dof_props["stiffness"].fill(0.0)
+        robot_dof_props["damping"].fill(50.0)
+        robot_dof_props["friction"].fill(0.00) 
+        robot_dof_props["velocity"].fill(100.0) 
+        self.gym.set_actor_dof_properties(env_ptr, car_actor_handle, robot_dof_props)
+
+        self.car_handles.append(car_actor_handle)
+
+        return
+    
+    def _build_mobile_robots_3(self, env_id, env_ptr):
+        col_group = env_id
+        col_filter = 0
+        segmentation_id = 0
+        default_pose = gymapi.Transform()
+        default_pose.p.x = 2.0
+        default_pose.p.y = 2.0
+        default_pose.p.z = 0.25
+        asset_options = gymapi.AssetOptions()
+
+        asset_root = "2wheels_urdf"  # 资产文件夹路径
+        asset_file = "robot_scaled.urdf"  # 资产文件名（URDF或SDF文件
+
+        robot_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
+        car_actor_handle = self.gym.create_actor(env_ptr, robot_asset, default_pose, "mobile_robots3", col_group, col_filter, segmentation_id)
+
+        robot_dof_props = self.gym.get_actor_dof_properties(env_ptr, car_actor_handle)
+        robot_dof_props["driveMode"].fill(gymapi.DOF_MODE_VEL)
+        robot_dof_props["stiffness"].fill(0.0)
+        robot_dof_props["damping"].fill(50.0)
+        robot_dof_props["friction"].fill(0.00) 
+        robot_dof_props["velocity"].fill(50.0) 
+        self.gym.set_actor_dof_properties(env_ptr, car_actor_handle, robot_dof_props)
+
+        self.car_handles.append(car_actor_handle)
+
+        return
+    
+    def quat_to_yaw(self, quat):
+        if len(quat.shape) == 0:
+            quat = quat.unsqueeze(0)
+        w, x, y, z = quat[3], quat[0], quat[1], quat[2]  # [x,y,z,w]
+        yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        return yaw
+    
+    def set_robot_wheel_velocities_simple(self, robot_handle, left_vel, right_vel):
+        """修复的轮子速度设置函数"""
+        try:
+            env_ptr = self.envs[0]
+            robot_dof_count = self.gym.get_actor_dof_count(env_ptr, robot_handle)
+            
+            if robot_dof_count >= 2:
+                if not hasattr(self, 'dof_states') or self.dof_states is None:
+                    self.prepare_tensors()
+                
+                robot_dof_start = self.gym.get_actor_dof_index(env_ptr, robot_handle, 0, gymapi.DOMAIN_SIM)
+                # left_vel = -float(left_vel)  
+                # right_vel = -float(right_vel) 
+                vel_targets = torch.zeros(self.dof_states.shape[0], device=self.device)
+                vel_targets[robot_dof_start] = float(left_vel)      # 左轮
+                vel_targets[robot_dof_start + 1] = float(right_vel) # 右轮
+                
+                self.gym.set_dof_velocity_target_tensor(self.sim, gymtorch.unwrap_tensor(vel_targets))
+                
+                if hasattr(self, '_debug_counter'):
+                    self._debug_counter += 1
+                    if self._debug_counter % 60 == 0:  # 每秒打印一次
+                        print(f"轮子速度: 左={left_vel:.2f}, 右={right_vel:.2f}")
+                else:
+                    self._debug_counter = 1
+            
+        except Exception as e:
+            print(f"设置轮子速度失败: {e}")
+
+    def control_differential_robot_simple(self, target_pos, current_pos, current_quat):
+        if isinstance(target_pos, torch.Tensor):
+            target_pos = target_pos.cpu().numpy()
+        if isinstance(current_pos, torch.Tensor):
+            current_pos = current_pos.cpu().numpy()
+        if isinstance(current_quat, torch.Tensor):
+            current_quat = current_quat.cpu().numpy()
+
+        direction = target_pos[:2] - current_pos[:2]
+        distance = np.linalg.norm(direction)
+        
+        if distance < self.robot_target_reached_threshold:
+            return 0.0, 0.0
+        
+        target_angle = np.arctan2(direction[1], direction[0])
+        
+        x, y, z, w = current_quat
+        current_angle = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        
+        angle_diff = target_angle - current_angle
+        while angle_diff > np.pi:
+            angle_diff -= 2 * np.pi
+        while angle_diff < -np.pi:
+            angle_diff += 2 * np.pi
+        
+        linear_speed = min(self.robot_wheel_speed, distance * 2.0)
+        angular_speed = angle_diff * self.robot_orientation_speed
+        
+        wheel_base = 0.3
+        left_vel = linear_speed - angular_speed * wheel_base / 2.0
+        right_vel = linear_speed + angular_speed * wheel_base / 2.0
+        
+        max_speed = self.robot_wheel_speed * 1.5
+        left_vel = np.clip(left_vel, -max_speed, max_speed)
+        right_vel = np.clip(right_vel, -max_speed, max_speed)
+        
+        return float(left_vel), float(right_vel)
+    
+# 重置车辆目标点
+    def _reset_car_target(self, env_ids):
+        if self.is_ask_llm:
+        # 换成英文，强调严格按照规定格式，看作成功率，输出结构化
+            answer = self.ask_llm(f"当前有一个差速机器人去推箱子，箱子位置是[3.5,7.5]，这时你需要考虑把箱子推出去，因此目标点不能和箱子位置重合，箱子是一个长宽都是1m的正方体，此外在{self._box_states[env_ids, 0]}处有一个障碍物，并且在[4.0,6.0]处有一个长方体障碍物，尺寸为[1.0,5.0]，人形只能对小障碍物做搬运，不能搬运长方体，如今人形已经把障碍物搬运到[0.5,6.0]处，请考虑效率，给出差速机器人要移动的目标点，只输出坐标")
+
+            match = re.search(r'\\boxed\{([^\}]+)\}', answer)
+            # import pdb; pdb.set_trace()
+            ans = match.group(1)
+            ans = re.search(r'\[([^\]]+)\]', ans)
+            coordinates = ans.group(1).split(',')
+
+            # 将字符串转换为浮点数
+            x = float(coordinates[0].strip())
+            y = float(coordinates[1].strip())
+
+            self.target_position[0] = torch.tensor(x)
+            self.target_position[1] = torch.tensor(y)
+
+            print(f"车辆目标点坐标为：{x},{y}")
+        else:
+
+            self.waypoints = torch.tensor(
+                [
+                    [0.5,5.0],
+                    [1.2, 9.0],
+                 [5.0, 9.0],
+                [5.0, 7.8],
+                [1.0, 7.8],
+                [1.4, 7.8],
+                [1.4, 9.0],
+                [0.405, 9.0],
+                [0.405, -1.95]
+                ], device=self.device)
+            
+            self.final_waypoints_1 = torch.tensor(
+                [
+                [0.49, -1.5],
+                [-1.5, -1.5],
+                [-1.5, -2.6],
+                [2.0,-2.6]
+                ], device=self.device)
+        return
+
+    # 重置车辆目标点
+    def _reset_car_target2(self, env_ids):
+        if self.is_ask_llm:
+        # 换成英文，强调严格按照规定格式，看作成功率，输出结构化
+            answer = self.ask_llm(f"当前有一个差速机器人去推箱子，箱子位置是[3.5,7.5]，这时你需要考虑把箱子推出去，因此目标点不能和箱子位置重合，箱子是一个长宽都是1m的正方体，此外在{self._box_states[env_ids, 0]}处有一个障碍物，并且在[4.0,6.0]处有一个长方体障碍物，尺寸为[1.0,5.0]，人形只能对小障碍物做搬运，不能搬运长方体，如今人形已经把障碍物搬运到[0.5,6.0]处，请考虑效率，给出差速机器人要移动的目标点，只输出坐标")
+
+            match = re.search(r'\\boxed\{([^\}]+)\}', answer)
+            # import pdb; pdb.set_trace()
+            ans = match.group(1)
+            ans = re.search(r'\[([^\]]+)\]', ans)
+            coordinates = ans.group(1).split(',')
+
+            # 将字符串转换为浮点数
+            x = float(coordinates[0].strip())
+            y = float(coordinates[1].strip())
+
+            self.target_position[0] = torch.tensor(x)
+            self.target_position[1] = torch.tensor(y)
+
+            print(f"车辆目标点坐标为：{x},{y}")
+        else:
+
+            self.waypoints_2 = torch.tensor(
+                [
+                    [5.0,-2.0],
+                    [5.0, -9.0],
+                    [3.84, -9.0],
+                    [3.84, -3.5],
+                    [3.84, -4.5],
+                    [5.0, -4.5],
+                    [5.0, -3.1],
+                    [1.7, -3.1],
+                ], device=self.device)
+        return
+    
+    # 重置车辆目标点
+    def _reset_car_target3(self, env_ids):
+        if self.is_ask_llm:
+        # 换成英文，强调严格按照规定格式，看作成功率，输出结构化
+            answer = self.ask_llm(f"当前有一个差速机器人去推箱子，箱子位置是[3.5,7.5]，这时你需要考虑把箱子推出去，因此目标点不能和箱子位置重合，箱子是一个长宽都是1m的正方体，此外在{self._box_states[env_ids, 0]}处有一个障碍物，并且在[4.0,6.0]处有一个长方体障碍物，尺寸为[1.0,5.0]，人形只能对小障碍物做搬运，不能搬运长方体，如今人形已经把障碍物搬运到[0.5,6.0]处，请考虑效率，给出差速机器人要移动的目标点，只输出坐标")
+
+            match = re.search(r'\\boxed\{([^\}]+)\}', answer)
+            # import pdb; pdb.set_trace()
+            ans = match.group(1)
+            ans = re.search(r'\[([^\]]+)\]', ans)
+            coordinates = ans.group(1).split(',')
+
+            # 将字符串转换为浮点数
+            x = float(coordinates[0].strip())
+            y = float(coordinates[1].strip())
+
+            self.target_position[0] = torch.tensor(x)
+            self.target_position[1] = torch.tensor(y)
+
+            print(f"车辆目标点坐标为：{x},{y}")
+        else:
+
+            self.waypoints_3 = torch.tensor(
+                [
+                    [-0.5,-5.0],
+                    [-1.2, -9.0],
+                 [-5.0, -9.0],
+                [-5.0, -8.2],
+                [-0.3, -8.2],
+                [-0.9, -8.2],
+                [-0.9, -9.0],
+                [0.3, -9.0],
+                [0.3, -4.6]
+                ], device=self.device)
+        return
+
+    # 预留LLM接口，接受目标点选择
+    def _reset_target(self, env_ids):
+        n = len(env_ids)
+        random_numbers = torch.rand(
+                [n], dtype=self._target_pos.dtype, device=self._target_pos.device)
+        
+        # rand_theta = 2 * np.pi * random_numbers
+        rand_theta = np.pi *torch.tensor(0.2,device=self._target_pos.device)
+        if self.is_ask_llm:
+        # 换成英文，强调严格按照规定格式，看作成功率，输出结构化
+            answer = self.ask_llm(f"当前有一个差速机器人要移动到目标点:[3.5,7.5]，但是在{self._box_states[env_ids, 0]}处有一个障碍物，并且在[4.0,6.0]处有一个长方体障碍物，尺寸为[1.0,5.0]，人形只能对小障碍物做搬运，不能搬运长方体，请考虑效率，给出想要把障碍物搬运到的目标点，只输出坐标")
+            match = re.search(r'\\boxed\{([^\}]+)\}', answer)
+            # import pdb; pdb.set_trace()
+            ans = match.group(1)
+            ans = re.search(r'\[([^\]]+)\]', ans)
+            coordinates = ans.group(1).split(',')
+
+            # 将字符串转换为浮点数
+            x = float(coordinates[0].strip())
+            y = float(coordinates[1].strip())
+
+            self._target_pos[env_ids, 0] = torch.tensor(x)
+            self._target_pos[env_ids, 1] = torch.tensor(y)
+
+            print(f"目标点坐标为：{x},{y}")
+        else:
+            # rand_dist = (self._target_dist_max - self._target_dist_min) * torch.rand(
+            #     [n], dtype=self._target_pos.dtype, device=self._target_pos.device) + self._target_dist_min
+            # self._target_pos[env_ids, 0] = rand_dist * \
+            #     torch.cos(rand_theta) + self._box_states[env_ids, 0]
+            # self._target_pos[env_ids, 1] = rand_dist * \
+            #     torch.sin(rand_theta) + self._box_states[env_ids, 1]
+            self._target_pos[env_ids, 0] = 4.0
+            self._target_pos[env_ids, 1] = 4.0
+            
+        self._target_pos[env_ids, 2] = self._height_box_size[env_ids] / 2.0
+        
+        axis = torch.tensor(
+            [0.0, 0.0, 1.0], dtype=self._target_pos.dtype, device=self._target_pos.device)
+        rand_rot = quat_from_angle_axis(rand_theta, axis)
+        self._target_rot[env_ids] = rand_rot
+        return
+    
+    def _reset_target2(self, env_ids):
+        n = len(env_ids)
+        random_numbers = torch.rand(
+                [n], dtype=self._target_pos.dtype, device=self._target_pos.device)
+        rand_theta = 2 * np.pi * random_numbers
+        if self.is_ask_llm:
+        # 换成英文，强调严格按照规定格式，看作成功率，输出结构化
+            answer = self.ask_llm(f"当前有一个差速机器人要移动到目标点:[3.5,7.5]，但是在{self._box_states[env_ids, 0]}处有一个障碍物，并且在[4.0,6.0]处有一个长方体障碍物，尺寸为[1.0,5.0]，人形只能对小障碍物做搬运，不能搬运长方体，请考虑效率，给出想要把障碍物搬运到的目标点，只输出坐标")
+            match = re.search(r'\\boxed\{([^\}]+)\}', answer)
+            # import pdb; pdb.set_trace()
+            ans = match.group(1)
+            ans = re.search(r'\[([^\]]+)\]', ans)
+            coordinates = ans.group(1).split(',')
+
+            # 将字符串转换为浮点数
+            x = float(coordinates[0].strip())
+            y = float(coordinates[1].strip())
+
+            self._target_pos[env_ids, 0] = torch.tensor(x)
+            self._target_pos[env_ids, 1] = torch.tensor(y)
+
+            print(f"目标点坐标为：{x},{y}")
+        else:
+            self._target_pos[env_ids, 0] = -2.0
+            self._target_pos[env_ids, 1] = 4.0
+            
+        self._target_pos[env_ids, 2] = self._height_box_size[env_ids] / 2.0
+        
+        axis = torch.tensor(
+            [0.0, 0.0, 1.0], dtype=self._target_pos.dtype, device=self._target_pos.device)
+        rand_rot = quat_from_angle_axis(rand_theta, axis)
+        self._target_rot[env_ids] = rand_rot
+        return
+
+    def _reset_env_tensors(self, env_ids):
+        super()._reset_env_tensors(env_ids)
+        box_env_ids_int32 = self._box_actor_ids[env_ids]
+        reset_env_ids_int32 = box_env_ids_int32
+
+        self.gym.set_actor_root_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self._root_states),
+                                                     gymtorch.unwrap_tensor(reset_env_ids_int32), len(reset_env_ids_int32))
+        return
+
+    def pre_physics_step(self, actions):
+        super().pre_physics_step(actions)
+        self._prev_root_pos[:] = self._humanoid_root_states[..., 0:3]
+        self._prev_box_pos[:] = self._box_states[..., 0:3]
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        self.fix_component_2_quat()
+        # 暂时被替换为车辆位置
+        component_wheel_1_state_tensor = all_root_state[-1]
+        
+        # 最后一个车辆和franka的距离
+        dist = torch.norm(self.waypoints[-1] - component_wheel_1_state_tensor[0:2])
+
+        # 最后一个零件和franka距离
+        if self.absorbed == 1:
+            self.apply_magnetic_force()
+        
+        #dist的条件：可能推过去之后这个距离就不是这个了？这样的话可能进不去循环；不懂为啥现在会飞走   
+        if dist < 0.3:
+            if self.wait_counter < self.wait_steps:
+                self.wait_counter += 1
+                return
+            else:
+                if self.franka_counter == 0 :
+                    self._franka_take_and_place_fsm()
+                elif self.franka_counter == 2:
+                    self.franka_task_stage = 0
+                    self._franka_take_and_place_fsm2()
+                else:
+                    self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
+        else:
+            self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
+        return
+
+    def update_standing_and_held_points(self, box_states, tar_pos, tar_rot, env_ids=None):
+        if env_ids is None:
+            box_pos = box_states[..., 0:3]
+            box_rot = box_states[..., 3:7]
+            # hard code: set standing points to the left
+            self.box_standing_points[:] = box_pos + \
+                quat_rotate(box_rot, self.stand_held_points_offset[0])
+            self.box_standing_points[..., 2] = 0.0
+            self.box_held_points[:] = box_pos + \
+                quat_rotate(box_rot, self.stand_held_points_offset[2])
+            # hard code: set standing points to the left
+            self.tar_standing_points[:] = tar_pos + \
+                quat_rotate(tar_rot, self.stand_held_points_offset[0])
+            self.tar_held_points[:] = tar_pos + \
+                quat_rotate(tar_rot, self.stand_held_points_offset[2])
+
+        else:
+            box_pos = box_states[env_ids, 0:3]
+            box_rot = box_states[env_ids, 3:7]
+            tar_pos = tar_pos[env_ids]
+            tar_rot = tar_rot[env_ids]
+            self.box_standing_points[env_ids] = box_pos + \
+                quat_rotate(box_rot,
+                            self.stand_held_points_offset[0][env_ids])
+            self.box_standing_points[env_ids, 2] = 0.0
+            self.box_held_points[env_ids] = box_pos + \
+                quat_rotate(box_rot,
+                            self.stand_held_points_offset[2][env_ids])
+            self.tar_standing_points[env_ids] = tar_pos + \
+                quat_rotate(tar_rot, self.stand_held_points_offset[0][env_ids])
+            self.tar_held_points[env_ids] = tar_pos + \
+                quat_rotate(tar_rot, self.stand_held_points_offset[2][env_ids])
+        return
+
+    def _compute_task_obs(self, env_ids=None):
+
+        if env_ids is None:
+            root_states = self._humanoid_root_states
+            box_states = self._box_states
+            box_bps = self.box_bps
+            tar_pos = self._target_pos
+            tar_rot = self._target_rot
+            # Note: Update Standing points and held points only can be after the box_states is updated
+            self.update_standing_and_held_points(box_states, tar_pos, tar_rot)
+            box_standing_points = self.box_standing_points
+            tar_standing_points = self.tar_standing_points
+            density = self.asset_density
+        else:
+            root_states = self._humanoid_root_states[env_ids]
+            box_states = self._box_states[env_ids]
+            tar_pos = self._target_pos[env_ids]
+            tar_rot = self._target_rot[env_ids]
+            box_bps = self.box_bps[:, env_ids, :]
+            self.update_standing_and_held_points(
+                self._box_states, self._target_pos, self._target_rot, env_ids)
+            box_standing_points = self.box_standing_points[env_ids]
+            tar_standing_points = self.tar_standing_points[env_ids]
+            density = self.asset_density[env_ids]
+
+        obs = compute_carrybox_observations(
+            root_states, box_states, tar_pos, tar_rot, box_bps, box_standing_points, tar_standing_points, 
+            density
+        )
+        # import pdb; pdb.set_trace()
+
+        self.record_step += 1
+        if self.log_success:
+            distance_to_target = torch.norm(box_states[..., 0:3] - tar_pos, dim=-1)
+            self._distance_to_target = np.array(distance_to_target.cpu().numpy())
+            success_env_mask = self._distance_to_target< 0.2
+            success_env_id = np.where(success_env_mask)
+            # success_step = [np.where(self._distance_to_target[i] < 0.2)[0][0] for i in success_env_id]
+            # print("Success rate: ", success_env_mask.sum() / self.num_envs)
+            # print("Success step: ", np.mean(success_step) / 30)
+            if self._distance_to_target[success_env_mask].size > 0:
+                mean_error = self._distance_to_target[success_env_mask].mean()
+            else:
+                mean_error = 100
+            # print("mean distance: ", mean_error)
+            self.log_success_rate.append(success_env_mask.sum() / self.num_envs)
+            self.log_success_precision.append(mean_error)
+            print("Max Success rate: ", max(self.log_success_rate))
+            print("Max Success precision: ", min(self.log_success_precision))
+
+            print(self.record_step)
+        return obs
+
+    def get_task_obs_size(self):
+        obs_size = 0
+        if (self._enable_task_obs):
+            # the original was 75, add 1 dimension for the density of the box
+            obs_size = 76
+        return obs_size
+
+    def _compute_reset(self):
+        box_pos = self._box_states[..., 0:3]
+        tar_pos = self._target_pos[..., 0:3]
+        prev_box_pos = self._prev_box_pos
+        dt_tensor = torch.tensor(self.dt, dtype=torch.float32)
+        hand_positions = self._rigid_body_pos[..., self._lift_body_ids, :]
+
+        self.reset_buf[:], self._terminate_buf[:] = compute_humanoid_reset(
+            self.reset_buf, self.progress_buf, self._contact_forces,
+            self._contact_body_ids, self._rigid_body_pos, self._box_contact_forces,
+            self._lift_body_ids, self.max_episode_length,
+            self._enable_early_termination, self._termination_heights,
+            box_pos, tar_pos, prev_box_pos, dt_tensor, hand_positions
+        )
+        return
+
+    def _compute_reward(self, actions):
+        # walk, held, carry, putdown
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        mobile_robot_state_tensor = all_root_state[-1]
+        mobile_robot_2_state_tensor = all_root_state[-2]
+        mobile_robot_3_state_tensor = all_root_state[-3]
+        component_wheel_1_state_tensor = all_root_state[-14]
+        component_wheel_2_state_tensor = all_root_state[-5]
+        component_body_state_tensor = all_root_state[-6]
+
+        if self.current_wp_idx == len(self.waypoints):
+            distance = 0
+            direction = 0
+        else:
+            distance = torch.norm(mobile_robot_state_tensor[0:2] - self.waypoints[self.current_wp_idx])
+            direction = self.waypoints[self.current_wp_idx] - mobile_robot_state_tensor[0:2]
+            direction = direction / torch.norm(direction)  # 归一化方向向量
+            # 角度
+            dx, dy = direction
+            angle = torch.atan2(dy,dx)+np.pi / 2
+            half_angle = angle /2.0
+            w = torch.cos(half_angle)
+            z = torch.sin(half_angle)
+        
+        if self.current_wp_idx_2 == len(self.waypoints_2):
+            distance_2 = 0
+            direction_2 = 0
+        else:
+            distance_2 = torch.norm(mobile_robot_2_state_tensor[0:2] - self.waypoints_2[self.current_wp_idx_2])
+            direction_2 = self.waypoints_2[self.current_wp_idx_2] - mobile_robot_2_state_tensor[0:2]
+            direction_2 = direction_2 / torch.norm(direction_2)  # 归一化方向向量
+
+        if self.current_wp_idx_3 == len(self.waypoints_3):
+            distance_3 = 0
+            direction_3 = 0
+        else:
+            distance_3 = torch.norm(mobile_robot_3_state_tensor[0:2] - self.waypoints_3[self.current_wp_idx_3])
+            direction_3 = self.waypoints_3[self.current_wp_idx_3] - mobile_robot_3_state_tensor[0:2]
+            direction_3 = direction_3 / torch.norm(direction_3)  # 归一化方向向量
+
+        step_size = torch.norm(self.update_pos)
+
+        # 距离大于阈值的情况下，正常走；小车和物块的距离贴上的时候，推动物块。
+        if distance > 0.05 and self.current_wp_idx < len(self.waypoints):
+            # 如果到达桌面，结束磁吸
+            self.keep_cube_attached_to_box()
+            mobile_robot_state_tensor[0:2] += direction * step_size
+            new_quat = convert_wz(w, z)
+            
+            # 如果此时小车和物块贴合，物块也进行移动
+            if torch.norm(mobile_robot_state_tensor[0:2] - component_wheel_1_state_tensor[0:2])<0.48:
+                component_wheel_1_state_tensor[0:2] += direction * step_size
+                all_root_state[-14] = component_wheel_1_state_tensor
+            
+           
+        elif distance < 0.05 and self.current_wp_idx < len(self.waypoints):
+            # 如果到达桌面，结束磁吸
+            self.keep_cube_attached_to_box()
+            # 重置目标点
+            self.current_wp_idx += 1
+            if self.current_wp_idx==1:
+                # 重置目标点，只能重设非常近的目标
+                # self._build_box_tensors_2()
+                self._reset_target2([0])
+        # 第一次零件装配完成，robot把方块推走
+        elif self.franka_count >= 1 and self.next_wp_idx< len(self.final_waypoints_1):
+            self.franka_counter = 2
+            distance_next = torch.norm(mobile_robot_state_tensor[0:2] - self.final_waypoints_1[self.next_wp_idx])
+            direction_next = self.final_waypoints_1[self.next_wp_idx] - mobile_robot_state_tensor[0:2]
+            direction_next = direction_next / torch.norm(direction_next)  # 归一化方向向量
+            if distance_next > 0.05 and self.next_wp_idx < len(self.final_waypoints_1):
+                mobile_robot_state_tensor[0:2] += direction_next * step_size
+
+            elif distance_next < 0.05 and self.next_wp_idx < len(self.final_waypoints_1):
+                self.next_wp_idx += 1
+            
+
+        all_root_state[-1] = mobile_robot_state_tensor
+
+        # robot2相同
+        if distance_2 > 0.05 and self.current_wp_idx_2 < len(self.waypoints_2):
+            self.keep_cube_attached_to_box_2()
+            # mobile_robot_2_state_tensor[0:2] += direction_2 * step_size
+            # if torch.norm(mobile_robot_2_state_tensor[0:2] - component_wheel_2_state_tensor[0:2])<0.57:
+            #     component_wheel_2_state_tensor[0:2] += direction_2 * step_size
+            #     all_root_state[-5] = component_wheel_2_state_tensor
+            # all_root_state[-2] = mobile_robot_2_state_tensor
+            target_waypoint = self.waypoints_2[self.current_wp_idx_2].cpu().numpy()
+            current_pos = mobile_robot_2_state_tensor[0:3].cpu().numpy()
+            current_quat = mobile_robot_2_state_tensor[3:7].cpu().numpy()
+            left_vel, right_vel = self.control_differential_robot_simple(
+                target_waypoint, current_pos, current_quat)
+            if hasattr(self, 'car_handles') and len(self.car_handles) > 0:
+                self.set_robot_wheel_velocities_simple(self.car_handles[0], left_vel, right_vel)
+            all_root_state[-2] = mobile_robot_2_state_tensor
+            
+        elif distance_2 < 0.05 and self.current_wp_idx_2 < len(self.waypoints_2):
+            # 如果到达桌面，结束磁吸
+            self.keep_cube_attached_to_box_2()
+            self.current_wp_idx_2 += 1
+        # franka完成，robot向前推
+        elif self.current_wp_idx_2 == len(self.waypoints_2) and self.franka_task_stage==3:
+            final_waypoints = torch.tensor([[1.0, -3.1]], device=self.device)
+            direction_2 = final_waypoints[0] - mobile_robot_2_state_tensor[0:2]
+            direction_2 = direction_2 / torch.norm(direction_2)  # 归一化方向向量
+            if torch.norm(mobile_robot_2_state_tensor[0:2] - final_waypoints[0:2])>0.05:
+                if torch.norm(mobile_robot_2_state_tensor[0:2] - component_wheel_2_state_tensor[0:2])<0.57:
+                    self.keep_cube_attached_to_box_2()
+                    component_wheel_2_state_tensor[0:2] += direction_2 * step_size/2
+                    all_root_state[-5] = component_wheel_2_state_tensor
+                mobile_robot_2_state_tensor[0:2] += direction_2 * step_size/2
+                all_root_state[-2] = mobile_robot_2_state_tensor
+
+        # robot3
+        if distance_3 > 0.05 and self.current_wp_idx_3 < len(self.waypoints_3):
+            self.keep_cube_attached_to_box_3()
+            mobile_robot_3_state_tensor[0:2] += direction_3 * step_size
+            # target_waypoint = self.waypoints[self.current_wp_idx]
+            # current_pos = mobile_robot_state_tensor[0:3]
+            # current_quat = mobile_robot_state_tensor[3:7]
+            
+            # left_vel, right_vel = self.control_differential_robot(target_waypoint, current_pos, current_quat)
+            # self.set_robot_wheel_velocities(self.car_handles[1], left_vel, right_vel)
+            
+            if torch.norm(mobile_robot_3_state_tensor[0:2] - component_body_state_tensor[0:2])<0.76:
+                component_body_state_tensor[0:2] += direction_3 * step_size
+                all_root_state[-6] = component_body_state_tensor
+            all_root_state[-3] = mobile_robot_3_state_tensor
+           
+        elif distance_3 < 0.05 and self.current_wp_idx_3 < len(self.waypoints_3):
+            # 如果到达桌面，结束磁吸
+            self.keep_cube_attached_to_box_3()
+            # 重置目标点
+            self.current_wp_idx_3 += 1
+        # franka完成第一个零件组装，robot向前推动
+        elif self.franka_count >= 1 and self.next_wp_idx == len(self.final_waypoints_1):
+            final_waypoints = torch.tensor([[0.3, -4.2]], device=self.device)
+            direction_3 = final_waypoints[0] - mobile_robot_3_state_tensor[0:2]
+            direction_3 = direction_3 / torch.norm(direction_3)
+            if torch.norm(mobile_robot_3_state_tensor[0:2] - final_waypoints[0:2])>0.05:
+                if torch.norm(mobile_robot_3_state_tensor[0:2] - component_body_state_tensor[0:2])<0.76:
+                    self.keep_cube_attached_to_box_3()
+                    component_body_state_tensor[0:2] += direction_3 * step_size/2
+                    all_root_state[-6] = component_body_state_tensor
+                mobile_robot_3_state_tensor[0:2] += direction_3 * step_size/2
+                all_root_state[-3] = mobile_robot_3_state_tensor
+                
+            
+        # self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(all_root_state))
+
+        obstacle_reward_w = 0.1
+
+        walk_pos_reward_w = 0.1
+        walk_vel_reward_w = 0.1
+        walk_face_reward_w = 0.1
+        held_hand_reward_w = 0.4
+        held_height_reward_w = 0.0
+        carry_box_reward_pos_far_w = 0.1
+        carry_box_reward_velocity_w = 0.0
+        carry_box_reward_pos_near_w = 0.2
+        carry_box_face_reward_w = 0.2
+        carry_box_dir_reward_w = 0.1
+        putdown_reward_w = 0.1
+
+        box_pos = self._box_states[..., 0:3]  # Box position
+        box_height = box_pos[..., 2]
+        box_rot = self._box_states[..., 3:7]  # Box rotation
+        prev_box_pos = self._prev_box_pos
+        box_standing_pos = self.box_standing_points
+        box_held_pos = self.box_held_points
+        held_point_height = box_held_pos[..., 2]
+        dt_tensor = torch.tensor(self.dt, dtype=torch.float32)
+
+        root_pos = self._humanoid_root_states[..., 0:3]  # 3d state
+        root_rot = self._humanoid_root_states[..., 3:7]  # 4d state
+        prev_root_pos = self._prev_root_pos
+        hand_positions = self._rigid_body_pos[..., self._lift_body_ids, :]
+        tar_pos = self._target_pos
+        tar_rot = self._target_rot
+
+        walk_pos_reward, walk_vel_reward, walk_face_reward = compute_walk_reward(
+            root_pos, root_rot, prev_root_pos, box_standing_pos, dt_tensor)
+
+        held_hand_reward = compute_contact_reward(
+            hand_positions, box_held_pos, root_pos, box_standing_pos, box_pos, tar_pos)
+
+        height_reward = compute_height_reward(held_point_height)
+        
+        carry_box_reward_pos_far, carry_box_reward_velocity, \
+            carry_box_reward_pos_near, carry_box_face_reward, \
+            carry_box_dir_reward, put_down_height_reward = compute_carry_reward(
+                root_pos, root_rot, box_pos, box_rot, prev_box_pos, tar_pos, tar_rot, held_point_height, dt_tensor)
+        
+        obs_reward = compute_obs_reward(
+            root_pos, root_rot, prev_root_pos, box_standing_pos, dt_tensor)
+
+
+        self.rew_buf[:] = walk_pos_reward_w * walk_pos_reward + \
+            walk_vel_reward_w * walk_vel_reward + \
+            walk_face_reward_w * walk_face_reward + \
+            held_hand_reward_w * held_hand_reward + \
+            held_height_reward_w * height_reward + \
+            carry_box_reward_pos_far_w * carry_box_reward_pos_far + \
+            carry_box_reward_velocity_w * carry_box_reward_velocity + \
+            carry_box_reward_pos_near_w * carry_box_reward_pos_near + \
+            carry_box_face_reward_w * carry_box_face_reward + \
+            carry_box_dir_reward_w * carry_box_dir_reward + \
+            putdown_reward_w * put_down_height_reward
+
+        walk_reward = walk_pos_reward_w * walk_pos_reward + \
+            walk_vel_reward_w * walk_vel_reward + \
+            walk_face_reward_w * walk_face_reward
+        contact_reward = held_hand_reward_w * held_hand_reward
+        carry_reward = carry_box_reward_pos_far_w * carry_box_reward_pos_far + \
+            carry_box_reward_velocity_w * carry_box_reward_velocity + \
+            carry_box_reward_pos_near_w * carry_box_reward_pos_near + \
+            carry_box_face_reward_w * carry_box_face_reward + \
+            carry_box_dir_reward_w * carry_box_dir_reward + \
+            putdown_reward_w * put_down_height_reward
+
+        box_half_height = self._height_box_size / 2.0
+        height_diff = compute_box_raise_height(box_half_height, box_height)
+        return
+
+    def _update_task(self):
+        return
+
+    def _reset_task(self, env_ids):
+        return
+
+    def _draw_task(self):
+        cols = np.array([[0.0, 1.0, 0.0]], dtype=np.float32)
+
+        self.gym.clear_lines(self.viewer)
+
+        tar_pos = self._target_pos
+        tar_rot = self._target_rot
+
+        box_bps = self.box_bps
+        lfus = box_bps[0]
+        lfds = box_bps[1]
+        lbus = box_bps[2]
+        lbds = box_bps[3]
+
+        rfus = box_bps[4]
+        rfds = box_bps[5]
+        rbus = box_bps[6]
+        rbds = box_bps[7]
+
+        tar_lfus = convert_static_point_to_world(lfus, tar_pos, tar_rot)
+        tar_lfds = convert_static_point_to_world(lfds, tar_pos, tar_rot)
+        tar_lbus = convert_static_point_to_world(lbus, tar_pos, tar_rot)
+        tar_lbds = convert_static_point_to_world(lbds, tar_pos, tar_rot)
+        tar_rfus = convert_static_point_to_world(rfus, tar_pos, tar_rot)
+        tar_rfds = convert_static_point_to_world(rfds, tar_pos, tar_rot)
+        tar_rbus = convert_static_point_to_world(rbus, tar_pos, tar_rot)
+        tar_rbds = convert_static_point_to_world(rbds, tar_pos, tar_rot)
+
+        verts1 = torch.cat([tar_lfus, tar_lfds], dim=-1).cpu().numpy()
+        verts2 = torch.cat([tar_lbus, tar_lbds], dim=-1).cpu().numpy()
+        verts3 = torch.cat([tar_rfus, tar_rfds], dim=-1).cpu().numpy()
+        verts4 = torch.cat([tar_rbus, tar_rbds], dim=-1).cpu().numpy()
+        verts5 = torch.cat([tar_lfus, tar_lbus], dim=-1).cpu().numpy()
+        verts6 = torch.cat([tar_lbus, tar_rbus], dim=-1).cpu().numpy()
+        verts7 = torch.cat([tar_rbus, tar_rfus], dim=-1).cpu().numpy()
+        verts8 = torch.cat([tar_rfus, tar_lfus], dim=-1).cpu().numpy()
+
+        for i, env_ptr in enumerate(self.envs):
+            curr_verts = verts1[i]
+            curr_verts = curr_verts.reshape([1, 6])
+            self.gym.add_lines(self.viewer, env_ptr,
+                               curr_verts.shape[0], curr_verts, cols)
+            curr_verts = verts2[i]
+            curr_verts = curr_verts.reshape([1, 6])
+            self.gym.add_lines(self.viewer, env_ptr,
+                               curr_verts.shape[0], curr_verts, cols)
+            curr_verts = verts3[i]
+            curr_verts = curr_verts.reshape([1, 6])
+            self.gym.add_lines(self.viewer, env_ptr,
+                               curr_verts.shape[0], curr_verts, cols)
+            curr_verts = verts4[i]
+            curr_verts = curr_verts.reshape([1, 6])
+            self.gym.add_lines(self.viewer, env_ptr,
+                               curr_verts.shape[0], curr_verts, cols)
+            curr_verts = verts5[i]
+            curr_verts = curr_verts.reshape([1, 6])
+            self.gym.add_lines(self.viewer, env_ptr,
+                               curr_verts.shape[0], curr_verts, cols)
+            curr_verts = verts6[i]
+            curr_verts = curr_verts.reshape([1, 6])
+            self.gym.add_lines(self.viewer, env_ptr,
+                               curr_verts.shape[0], curr_verts, cols)
+            curr_verts = verts7[i]
+            curr_verts = curr_verts.reshape([1, 6])
+            self.gym.add_lines(self.viewer, env_ptr,
+                               curr_verts.shape[0], curr_verts, cols)
+            curr_verts = verts8[i]
+            curr_verts = curr_verts.reshape([1, 6])
+            self.gym.add_lines(self.viewer, env_ptr,
+                               curr_verts.shape[0], curr_verts, cols)
+
+        return
+
+
+#####################################################################
+### =========================jit functions=========================###
+#####################################################################
+
+@torch.jit.script
+def convert_static_point_to_local_observation(point_pos, root_states, central_pos, central_rot):
+    root_pos = root_states[:, 0:3]
+    root_rot = root_states[:, 3:7]
+
+    point_states = torch.zeros_like(root_states[..., 0:3])
+    point_states[:] = point_pos
+    rotate_point_staets = quat_rotate(central_rot, point_states)
+    target_point_staets = central_pos + rotate_point_staets
+    heading_rot = torch_utils.calc_heading_quat_inv(root_rot)
+    local_point_pos = quat_rotate(heading_rot, target_point_staets - root_pos)
+    return local_point_pos
+
+
+@torch.jit.script
+def convert_static_point_to_world(point_pos, central_pos, central_rot):
+    point_states = torch.zeros_like(central_pos[..., 0:3])
+    point_states[:] = point_pos
+    rotate_point_staets = quat_rotate(central_rot, point_states)
+    target_point_staets = central_pos + rotate_point_staets
+    return target_point_staets
+
+
+@torch.jit.script
+def compute_carrybox_observations(root_states, box_states, tar_pos, tar_rot, box_bps, box_standing_points, tar_standing_points, density):
+    root_pos = root_states[:, 0:3]
+    root_rot = root_states[:, 3:7]
+    heading_rot = torch_utils.calc_heading_quat_inv(root_rot)  # (num_envs, 4)
+
+    box_pos = box_states[:, 0:3]
+    box_rot = box_states[:, 3:7]
+    box_vel = box_states[:, 7:10]
+    box_ang_vel = box_states[:, 10:13]
+
+    local_box_pos = box_pos - root_pos
+    local_box_pos = quat_rotate(heading_rot, local_box_pos)
+
+    box_standing_points_xy = box_standing_points[:, 0:3]
+    box_standing_points_xy[:, 2] = 0.0
+    local_box_standing_points_pos = box_standing_points_xy - root_pos
+    local_box_standing_points_pos = quat_rotate(
+        heading_rot, local_box_standing_points_pos)
+
+    local_box_rot = quat_mul(heading_rot, box_rot)
+    local_box_rot_obs = torch_utils.quat_to_tan_norm(local_box_rot)
+
+    local_box_vel = quat_rotate(heading_rot, box_vel)
+    local_box_ang_vel = quat_rotate(heading_rot, box_ang_vel)
+
+    local_tar_pos = tar_pos - root_pos
+    local_tar_pos_obs = quat_rotate(heading_rot, local_tar_pos)
+    local_tar_rot = quat_mul(heading_rot, tar_rot)
+    local_tar_rot_obs = torch_utils.quat_to_tan_norm(local_tar_rot)
+
+    tar_standing_points_xy = tar_standing_points[:, 0:3]
+    tar_standing_points_xy[:, 2] = 0.0
+    local_tar_standing_points_pos = tar_standing_points_xy - root_pos
+    local_tar_standing_points_pos = quat_rotate(
+        heading_rot, local_tar_standing_points_pos)
+
+    lfus = box_bps[0]
+    lfds = box_bps[1]
+    lbus = box_bps[2]
+    lbds = box_bps[3]
+
+    rfus = box_bps[4]
+    rfds = box_bps[5]
+    rbus = box_bps[6]
+    rbds = box_bps[7]
+
+    box_local_lfus_pos = convert_static_point_to_local_observation(
+        lfus, root_states, box_pos, box_rot)
+    box_local_lfds_pos = convert_static_point_to_local_observation(
+        lfds, root_states, box_pos, box_rot)
+    box_local_lbus_pos = convert_static_point_to_local_observation(
+        lbus, root_states, box_pos, box_rot)
+    box_local_lbds_pos = convert_static_point_to_local_observation(
+        lbds, root_states, box_pos, box_rot)
+
+    box_local_rfus_pos = convert_static_point_to_local_observation(
+        rfus, root_states, box_pos, box_rot)
+    box_local_rfds_pos = convert_static_point_to_local_observation(
+        rfds, root_states, box_pos, box_rot)
+    box_local_rbus_pos = convert_static_point_to_local_observation(
+        rbus, root_states, box_pos, box_rot)
+    box_local_rbds_pos = convert_static_point_to_local_observation(
+        rbds, root_states, box_pos, box_rot)
+
+    # add bps for tar
+
+    tar_local_lfus_pos = convert_static_point_to_local_observation(
+        lfus, root_states, tar_pos, tar_rot)
+    tar_local_lfds_pos = convert_static_point_to_local_observation(
+        lfds, root_states, tar_pos, tar_rot)
+    tar_local_lbus_pos = convert_static_point_to_local_observation(
+        lbus, root_states, tar_pos, tar_rot)
+    tar_local_lbds_pos = convert_static_point_to_local_observation(
+        lbds, root_states, tar_pos, tar_rot)
+
+    tar_local_rfus_pos = convert_static_point_to_local_observation(
+        rfus, root_states, tar_pos, tar_rot)
+    tar_local_rfds_pos = convert_static_point_to_local_observation(
+        rfds, root_states, tar_pos, tar_rot)
+    tar_local_rbus_pos = convert_static_point_to_local_observation(
+        rbus, root_states, tar_pos, tar_rot)
+    tar_local_rbds_pos = convert_static_point_to_local_observation(
+        rbds, root_states, tar_pos, tar_rot)
+
+    obs = torch.cat([local_box_pos, local_box_rot_obs,
+                    local_box_vel, local_box_ang_vel], dim=-1)
+    obs = torch.cat([box_local_lfus_pos, box_local_lfds_pos, box_local_lbus_pos, box_local_lbds_pos,
+                    box_local_rfus_pos, box_local_rfds_pos, box_local_rbus_pos, box_local_rbds_pos, obs], dim=-1)
+    obs = torch.cat([local_box_standing_points_pos, obs], dim=-1)
+    obs = torch.cat([local_tar_pos_obs, local_tar_rot_obs, obs], dim=-1)
+    obs = torch.cat([tar_local_lfus_pos, tar_local_lfds_pos, tar_local_lbus_pos, tar_local_lbds_pos,
+                    tar_local_rfus_pos, tar_local_rfds_pos, tar_local_rbus_pos, tar_local_rbds_pos, obs], dim=-1)
+    obs = torch.cat([torch.unsqueeze(density, -1), obs], dim=-1)
+    # Do not use standing points for targets
+    # obs = torch.cat(local_tar_standing_points_pos, obs)
+
+    return obs
+
+@torch.jit.script
+def compute_humanoid_reset(reset_buf, progress_buf, contact_buf, contact_body_ids,
+                           rigid_body_pos, box_contact_forces, lift_body_ids,
+                           max_episode_length, enable_early_termination,
+                           termination_heights,
+                           box_pos, tar_pos, prev_box_pos, dt_tensor, hand_positions):
+    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, int, bool, Tensor,Tensor,Tensor,Tensor,Tensor,Tensor) -> Tuple[Tensor, Tensor]
+    contact_force_threshold = 1.0
+    box_vel_threshold = 1.0
+    box_height_threshold = 0.3
+    success_threshold = 0.05
+
+    terminated = torch.zeros_like(reset_buf)
+
+    # Early termination logic based on contact forces and body positions
+    if enable_early_termination:
+        # Mask the contact forces of the lifting body parts so they're not considered
+        fall_masked_contact_buf = contact_buf.clone()
+        fall_masked_contact_buf[:, contact_body_ids, :] = 0
+
+        # Check if any body parts are making contact with a force above a minimal threshold
+        # to determine if a fall contact has occurred.
+        fall_contact = torch.any(
+            torch.abs(fall_masked_contact_buf) > 0.1, dim=-1)
+        fall_contact = torch.any(fall_contact, dim=-1)
+
+        # Check if the body height of any body parts is below a certain threshold
+        # to determine if a fall due to height has occurred.
+        body_height = rigid_body_pos[..., 2]
+        fall_height = body_height < termination_heights
+        # Do not consider lifting body parts for the height check
+        fall_height[:, contact_body_ids] = False
+        fall_height = torch.any(fall_height, dim=-1)
+
+        # Combine the conditions to determine if the humanoid has fallen
+        has_fallen = torch.logical_and(fall_contact, fall_height)
+
+        # check if the box is in target
+        box_to_target_distance = torch.norm(box_pos - tar_pos, dim=-1)
+        box_in_target = box_to_target_distance < success_threshold
+
+        # check if the humanoid is kicking the box
+        box_height = box_pos[..., 2]
+        delta_box_pos = box_pos - prev_box_pos
+        box_vel = delta_box_pos / dt_tensor
+        box_vel_xy = box_vel[..., 0:2]
+        box_vel_xy_norm = torch.norm(box_vel_xy, dim=-1)
+        box_has_velocity_horizontal = box_vel_xy_norm > box_vel_threshold
+        box_low = box_height < box_height_threshold
+        mean_hand_positions = hand_positions[..., 0:3].mean(dim=1)
+        hand_high = mean_hand_positions[..., 2] > 0.5
+
+        box_kicked = torch.logical_and(box_has_velocity_horizontal, box_low)
+        box_kicked_with_hands_high = torch.logical_and(box_kicked, hand_high)
+
+        # has_failed = has_fallen
+        # if forbid the agents to kick box,the agents may not know what to do.
+        has_failed = torch.logical_or(has_fallen, box_kicked_with_hands_high)
+
+        # first timestep can sometimes still have nonzero contact forces
+        # so only check after first couple of steps
+        has_failed *= (progress_buf > 1)
+        terminated = torch.where(
+            has_failed, torch.ones_like(reset_buf), terminated)
+        # terminated = torch.where(
+        #     box_in_target, torch.ones_like(reset_buf), terminated)
+
+    reset = torch.where(progress_buf >= max_episode_length - 1,
+                        torch.ones_like(reset_buf), terminated)
+
+    return reset, terminated
+
+
+@torch.jit.script
+def compute_walk_reward(root_pos, root_rot, prev_root_pos, box_standing_pos, dt):
+    # encourage the agent to walk towards box standing points
+
+    near_threshold = 0.04
+    target_speed = 1.0  # target speed in m/s
+    pos_err_scale = 2.0
+    vel_err_scale = 2.0
+
+    # compute r_walk_pos
+    box_standing_points_pos = box_standing_pos[..., 0:2]
+    box_pos_diff = box_standing_points_pos - root_pos[..., 0:2]
+    box_pos_err = torch.sum(box_pos_diff * box_pos_diff, dim=-1)
+    box_pos_reward = torch.exp(-pos_err_scale * box_pos_err)
+
+    # compute r_walk_vel
+
+    delta_root_pos = root_pos - prev_root_pos
+    root_vel = delta_root_pos / dt
+    box_dir = torch.nn.functional.normalize(box_pos_diff, dim=-1)
+    box_dir_speed = torch.sum(box_dir * root_vel[..., :2], dim=-1)
+    box_vel_err = target_speed - box_dir_speed
+    box_vel_err = torch.clamp_min(box_vel_err, 0.0)
+    vel_reward = torch.exp(-vel_err_scale * (box_vel_err * box_vel_err))
+    speed_mask = box_dir_speed <= 0
+    vel_reward[speed_mask] = 0
+
+    # compute r_walk_face
+
+    heading_rot = torch_utils.calc_heading_quat(root_rot)
+
+    facing_dir = torch.zeros_like(root_pos[..., 0:3])
+    facing_dir[..., 0] = 1.0
+    facing_dir = quat_rotate(heading_rot, facing_dir)
+
+    facing_err = torch.sum(box_dir * facing_dir[..., 0:2], dim=-1)
+    facing_reward = torch.clamp_min(facing_err, 0.0)
+
+    # compute r_walk
+
+    near_mask = box_pos_err <= near_threshold
+    box_pos_reward[near_mask] = 1.0
+    vel_reward[near_mask] = 1.0
+    facing_reward[near_mask] = 1.0
+
+    return box_pos_reward, vel_reward, facing_reward
+
+
+@torch.jit.script
+def compute_obs_reward(root_pos, root_rot, prev_root_pos, box_standing_pos, dt):
+    # encourage the agent to walk towards box standing points
+
+    near_threshold = 0.04
+    target_speed = 1.0  # target speed in m/s
+    pos_err_scale = 2.0
+    vel_err_scale = 2.0
+
+    # compute r_walk_pos
+    box_standing_points_pos = box_standing_pos[..., 0:2]
+    box_pos_diff = box_standing_points_pos - root_pos[..., 0:2]
+    box_pos_err = torch.sum(box_pos_diff * box_pos_diff, dim=-1)
+    box_pos_reward = torch.exp(-pos_err_scale * box_pos_err)
+
+    # compute r_walk_vel
+
+    delta_root_pos = root_pos - prev_root_pos
+    root_vel = delta_root_pos / dt
+    box_dir = torch.nn.functional.normalize(box_pos_diff, dim=-1)
+    box_dir_speed = torch.sum(box_dir * root_vel[..., :2], dim=-1)
+    box_vel_err = target_speed - box_dir_speed
+    box_vel_err = torch.clamp_min(box_vel_err, 0.0)
+    vel_reward = torch.exp(-vel_err_scale * (box_vel_err * box_vel_err))
+    speed_mask = box_dir_speed <= 0
+    vel_reward[speed_mask] = 0
+
+    # compute r_walk_face
+
+    heading_rot = torch_utils.calc_heading_quat(root_rot)
+
+    facing_dir = torch.zeros_like(root_pos[..., 0:3])
+    facing_dir[..., 0] = 1.0
+    facing_dir = quat_rotate(heading_rot, facing_dir)
+
+    facing_err = torch.sum(box_dir * facing_dir[..., 0:2], dim=-1)
+    facing_reward = torch.clamp_min(facing_err, 0.0)
+
+    # compute r_walk
+
+    near_mask = box_pos_err <= near_threshold
+    box_pos_reward[near_mask] = 1.0
+    vel_reward[near_mask] = 1.0
+    facing_reward[near_mask] = 1.0
+
+    return box_pos_reward, vel_reward, facing_reward
+
+
+
+@torch.jit.script
+def compute_contact_reward(hand_positions, box_held_points, root_pos, box_standing_pos, box_pos, tar_pos):
+    box_near_threshold = 0.09
+    carry_dist_threshold = 0.04
+    box_height_threshold = 0.4
+    held_pos_err_scale = 5.0
+    mean_hand_positions = hand_positions[..., 0:3].mean(dim=1)
+    hand2box_diff = mean_hand_positions - box_held_points[..., 0:3]
+    hands2box_pos_err = torch.sum(hand2box_diff * hand2box_diff, dim=-1)
+    hands2box_reward = torch.exp(-held_pos_err_scale * hands2box_pos_err)
+    # compute masks when walking to box
+    # box_standing_points_pos = box_standing_pos[..., 0:2]
+    # box_pos_diff = box_standing_points_pos - root_pos[..., 0:2]
+    # box_pos_err = torch.sum(box_pos_diff * box_pos_diff, dim=-1)
+    # box_near_mask = box_pos_err <= box_near_threshold
+    # hands2box_reward[~box_near_mask] = 0.0
+    # compute masks when putdown
+    box_height = box_held_points[..., 2]
+    target_state_diff = tar_pos - box_pos  # xyz
+    target_pos_err_xy = torch.sum(target_state_diff[..., 0:2] ** 2, dim=-1)
+    near_mask = target_pos_err_xy <= carry_dist_threshold  # near_mask
+    near_and_low_mask = torch.logical_and(
+        near_mask, box_height < box_height_threshold)
+    hands2box_reward[near_and_low_mask] = 1.0
+    return hands2box_reward
+
+
+@torch.jit.script
+def compute_height_reward(held_point_height):
+    target_height = 0.8
+    height_err_scale = 10.0
+    box_height_diff = target_height - held_point_height
+    height_reward = torch.exp(
+        -height_err_scale * box_height_diff * box_height_diff)
+    return height_reward
+
+
+@torch.jit.script
+def compute_carry_reward(root_pos, root_rot, box_pos, box_rot, prev_box_pos, target_pos, target_rot, held_point_height, dt_tensor):
+    target_speed = 1.0  # target speed in m/s
+    carry_dist_threshold = 0.04
+    height_threshold = 0.6
+    tar_pos_err_far_scale = 0.5
+    target_pos_err_near_scale = 10.0
+    carry_vel_err_scale = 2.0
+
+    x_axis = torch.zeros_like(root_pos[..., 0:3])
+    x_axis[..., 0] = 1.0
+
+    # masks
+    box_height = box_pos[..., 2]
+    height_mask = box_height < height_threshold
+
+    # compute r_carry_pos
+    target_state_diff = target_pos - box_pos  # xyz
+    target_pos_err_xy = torch.sum(target_state_diff[..., 0:2] ** 2, dim=-1)
+    near_mask = target_pos_err_xy <= carry_dist_threshold  # near_mask
+    target_pos_err_xyz = torch.sum(target_state_diff[..., 0:3] ** 2, dim=-1)
+    target_pos_reward_far = torch.exp(-tar_pos_err_far_scale *
+                                      target_pos_err_xy)
+    target_pos_reward_near = torch.exp(-target_pos_err_near_scale *
+                                       target_pos_err_xyz)
+
+    far_and_low_mask = torch.logical_and(~near_mask, height_mask)
+    target_pos_reward_far[far_and_low_mask] = 0.0
+    target_pos_reward_near[far_and_low_mask] = 0.0
+    target_pos_reward_far[near_mask] = 1.0
+
+    # compute_r_carry_face
+    tar_dir = target_pos[..., 0:2] - box_pos[..., 0:2]
+    tar_dir = torch.nn.functional.normalize(tar_dir, dim=-1)
+    tar_dir_reverse = box_pos[..., 0:2] - target_pos[..., 0:2]
+    tar_dir_reverse = torch.nn.functional.normalize(tar_dir_reverse, dim=-1)
+    root_heading_rot = torch_utils.calc_heading_quat(root_rot)
+    root_facing_dir = quat_rotate(root_heading_rot, x_axis)
+    # check whether the marker is behind the agent
+    # if target is in front of the agent, then the agent should walk towards the target
+    # if target is behind the agent, then the agent should walk backward to the target
+    front_mask = torch.sum(tar_dir * root_facing_dir[..., 0:2], dim=-1) > 0
+    behind_mask = torch.sum(
+        tar_dir_reverse * root_facing_dir[..., 0:2], dim=-1) > 0
+    facing_err = torch.sum(tar_dir * root_facing_dir[..., 0:2], dim=-1)
+    facing_err[behind_mask] = torch.sum(
+        tar_dir_reverse * root_facing_dir[..., 0:2], dim=-1)[behind_mask]
+    facing_reward = torch.clamp_min(facing_err, 0.0)
+    facing_reward[height_mask] = 0.0
+    facing_reward[near_mask] = 1.0
+
+    # compute r_carry_vel
+    delta_box_pos = box_pos - prev_box_pos
+    box_vel = delta_box_pos / dt_tensor
+    box_tar_dir_speed = torch.sum(
+        tar_dir * box_vel[..., 0:2], dim=-1)
+    tar_vel_err = target_speed - box_tar_dir_speed
+    tar_vel_err = torch.clamp_min(tar_vel_err, 0.0)
+    tar_vel_reward = torch.exp(-carry_vel_err_scale *
+                               (tar_vel_err * tar_vel_err))
+    tar_speed_mask = box_tar_dir_speed <= 0
+    tar_vel_reward[tar_speed_mask] = 0
+    tar_vel_reward[height_mask] = 0.0
+
+    # compute r_carry_dir
+    # calculate the facing direction of the box
+    box_facing_dir = quat_rotate(box_rot, x_axis)
+    tar_facing_dir = quat_rotate(target_rot, x_axis)
+    dir_err = torch.sum(
+        box_facing_dir[..., 0:2] * tar_facing_dir[..., 0:2], dim=-1)  # xy;higher value indicating better alignment
+    dir_reward = torch.clamp_min(dir_err, 0.0)
+    dir_reward[~near_mask] = 0.0
+
+    # compute r_putdown
+    held_points_height = held_point_height - target_pos[..., 2]
+    put_down_height_reward = torch.exp(
+        -5.0 * held_points_height * held_points_height)
+    put_down_height_reward[~near_mask] = 0
+    return target_pos_reward_far, tar_vel_reward, target_pos_reward_near, facing_reward, dir_reward, put_down_height_reward
+
+
+@torch.jit.script
+def compute_task_finish(box_pos, tar_pos, success_threshold):
+    # type: (Tensor, Tensor, float) -> Tensor
+    pos_diff = tar_pos - box_pos
+    pos_err = torch.norm(pos_diff, p=2, dim=-1)
+    dist_mask = pos_err <= success_threshold
+    return dist_mask
+
+
+@torch.jit.script
+def compute_box_raise_height(box_half_size, box_height):
+    height_diff = box_height - box_half_size
+    return height_diff
