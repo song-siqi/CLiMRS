@@ -16,15 +16,12 @@ import math
 from scipy.spatial.transform import Rotation as R, Slerp
 from controllers.franka_osc_controller import FrankaOSCController
 from controllers.kinematics import FrankaIKGym
-from controllers.DiffIK import DiffIK
-import toppra as ta
-from controllers.topp import Topp
 from rrt_algorithms.planpath import plan_paths_for_cars_and_boxes, plan_paths_for_boxes_to_franka_area
 # from ask_Llm import ask_llm
 # TODO:
 # 3. 单LLM做多决策
 # 4. LLM prompt
-# self.component_handles[2] 这是车体
+# self.component_handles[2] body
 
 class Pose:
     def __init__(self, pos, quat):
@@ -112,12 +109,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.controller = FrankaOSCController()
         urdf_path = "Agent/franka_description/robots/franka_panda.urdf"
         self.ik_solver = FrankaIKGym(urdf_path)
-        self.planner = Topp(
-            dof=7,
-            qc_vel=0.8,
-            qc_acc=0.8,
-            ik=self.ik_solver.solve
-        )
         self.franka_task_stage = 0
         self.franka_task_stage_1 = 0
         self.franka_path = None
