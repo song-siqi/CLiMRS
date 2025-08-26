@@ -17,7 +17,7 @@ from scipy.spatial.transform import Rotation as R, Slerp
 from controllers.franka_osc_controller import FrankaOSCController
 from controllers.kinematics import FrankaIKGym
 from rrt_algorithms.planpath import plan_paths_for_cars_and_boxes, plan_paths_for_boxes_to_franka_area
-# from ask_Llm import ask_llm
+
 # TODO:
 # 3. 单LLM做多决策
 # 4. LLM prompt
@@ -49,10 +49,11 @@ def convert_wz(w: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
     quat_y = torch.zeros_like(z)
     return torch.stack([quat_x, quat_y, z, w], dim=-1)
 
+
 class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
     def __init__(self, cfg, sim_params, physics_engine, device_type, device_id, headless):
-        self.API_URL = "https://api.claudeshop.top"  # 替换为你的 API URL
-        self.API_KEY = "sk-8Ya7RPGO6cwJWVtzKXLqHtzHMzO3Ax8FnsmGSER6dPqeNKD3"  # 替换为你的 API 密钥
+        self.API_URL = "https://api.claudeshop.top"  
+        self.API_KEY = "sk-8Ya7RPGO6cwJWVtzKXLqHtzHMzO3Ax8FnsmGSER6dPqeNKD3" 
         self.current_wp_idx = 0
         self.current_wp_idx_2 = 0
         self.current_wp_idx_3 = 0
@@ -210,35 +211,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._build_box_tensors()
         self._build_target_state_tensors()
         self._reset_target([0])
-
-    def ask_llm(self,question):
-        headers = {
-        'Accept': 'application/json',
-        'Authorization': f'Bearer {self.API_KEY}',
-        'User-Agent':'Apifox/1.0.0(https://apifox.com)',
-        'Content-Type': 'application/json'
-    }
-        prompt = """你可以解决一下我遇到的机器人决策问题吗？ {} 
-                                现在请你一步一步的完成上面的问题，把答案填到下面的框内， \\boxed{{answer}},作为你的最终答案."""
-        
-        payload = json.dumps({
-        "model":"o1-mini",
-        "messages": [
-            {"role": "user", "content": prompt.format(question)}
-        ]
-    })
-        url = self.API_URL + "/v1/chat/completions"
-
-        try:
-            response = requests.post(url, headers=headers, data=payload)
-            response = response.json()
-            return response.get("choices", [])[0].get("message", {}).get("content", "")
-            # response.raise_for_status()  # 检查是否有错误
-            # result = response.json()  # 解析返回的 JSON 数据
-            # return result.get("choices")[0].get("text", "").strip()  # 获取模型返回的文本
-        except Exception as e:
-            return f"Error: {e}"
-        
+       
     def _build_lift_body_ids_tensor(self, lift_body_names):
         env_ptr = self.envs[0]
         actor_handle = self.humanoid_handles[0]
@@ -291,8 +264,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         width_box_size = self._default_box_width_size
         length_box_size = self._default_box_length_size
         height_box_size = self._default_box_height_size
-
-        
         self.asset_density = torch.zeros(self.num_envs).to(self.device)
 
         for env_id in range(self.num_envs):
@@ -316,7 +287,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self.sim, box_length, box_width, box_height, asset_options))
             self.obs_box3.append(self.gym.create_box(
                 self.sim, box_length, box_width, box_height, asset_options))
-            
+        
             self.obs_component.append(self.gym.create_box(
                 self.sim, 0.6, 0.5, box_height-0.2, asset_options))
             
@@ -450,8 +421,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._height_box_size[env_id] = scaling_factor_h * \
             self._default_box_height_size
 
-        # box_handle = self.gym.create_actor(
-        #     env_ptr, self._box_asset[env_id], default_pose, "box", col_group, col_filter, segmentation_id)
         obs_box_handle = self.gym.create_actor(
             env_ptr, self.obs_box1[env_id], default_pose10, "box", col_group, col_filter, segmentation_id)
         obs_box_handle2 = self.gym.create_actor(
@@ -489,7 +458,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._box_handles.append(box_handle7)
         self._box_handles.append(box_handle8)
         self._box_handles.append(box_handle9)
-        # self._box_handles.append(obs_box_handle)
         self._box_handles.append(obs_box_handle2)
         self._box_handles.append(obs_box_handle3)
 
@@ -946,109 +914,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.franka_effort_action = torch.zeros_like(self.franka_pos_action)
 
         return self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm
-    
-    # Magnetic logic, component_handles is the component, box_handles is the corresponding box.
-    def keep_cube_attached_to_box(self):
-        if not self.component_handles or not self._box_handles:
-            return   
-        env_ptr = self.envs[0]
-        cube_handle = self.component_handles[0]
-        box_handle = self._box_handles[-2]
-
-        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        root_state = gymtorch.wrap_tensor(root_state)
-
-        cube_root_idx = self.gym.get_actor_index(env_ptr, cube_handle, gymapi.DOMAIN_SIM)
-        box_root_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
-
-        box_pos = root_state[box_root_idx, 0:3]
-        box_quat = root_state[box_root_idx, 3:7]
-
-        box_quat = box_quat.unsqueeze(0)
-        offset = torch.tensor([0.0, 0.0, 0.2], device=box_pos.device).unsqueeze(0)
-        offset_world = quat_rotate(box_quat, offset).squeeze(0)
-        target_cube_pos = box_pos + offset_world
-        target_cube_quat = box_quat.squeeze(0)
-
-        current_cube_pos = root_state[cube_root_idx, 0:3]
-        current_cube_quat = root_state[cube_root_idx, 3:7]
-        alpha = 0.8
-        new_cube_pos = alpha * target_cube_pos + (1 - alpha) * current_cube_pos
-        new_cube_quat = slerp(current_cube_quat.cpu().numpy(), target_cube_quat.cpu().numpy(), alpha)
-
-        root_state[cube_root_idx, 0:3] = new_cube_pos
-        root_state[cube_root_idx, 3:7] = torch.tensor(new_cube_quat, device=box_pos.device)
-
-        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
-    
-    def keep_cube_attached_to_box_2(self):
-        if not self.component_handles or not self.component_cube_handles:
-            return
-        env_ptr = self.envs[0]
-        cube_handle = self.component_handles[2]
-        box_handle = self.component_cube_handles[1]
-
-        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        root_state = gymtorch.wrap_tensor(root_state)
-
-        cube_root_idx = self.gym.get_actor_index(env_ptr, cube_handle, gymapi.DOMAIN_SIM)
-        box_root_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
-        box_pos = root_state[box_root_idx, 0:3]
-        box_quat = root_state[box_root_idx, 3:7]
-        offset = torch.tensor([-0.05, 0.0, 0.2], device=box_pos.device).unsqueeze(0)   #new
-        box_quat_unsq = box_quat.unsqueeze(0)
-        offset_world = quat_rotate(box_quat_unsq, offset).squeeze(0)
-        target_cube_pos = box_pos + offset_world
-
-        current_cube_pos = root_state[cube_root_idx, 0:3]
-        alpha = 0.6
-        new_cube_pos = alpha * target_cube_pos + (1 - alpha) * current_cube_pos
-
-        root_state[cube_root_idx, 0:3] = new_cube_pos
-        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
-    
-    def keep_cube_attached_to_box_3(self):
-        if not self.component_handles or not self.component_cube_handles:
-            return
-        env_ptr = self.envs[0]
-        cube_handle = self.component_handles[1]
-        box_handle = self.component_cube_handles[0]
-
-        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        root_state = gymtorch.wrap_tensor(root_state)
-
-        cube_root_idx = self.gym.get_actor_index(env_ptr, cube_handle, gymapi.DOMAIN_SIM)
-        box_root_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
-
-        box_pos = root_state[box_root_idx, 0:3]
-        box_quat = root_state[box_root_idx, 3:7]
-
-        box_quat = box_quat.unsqueeze(0)
-        offset = torch.tensor([0.0, 0.0, 0.2], device=box_pos.device).unsqueeze(0)
-        offset_world = quat_rotate(box_quat, offset).squeeze(0)
-        target_cube_pos = box_pos + offset_world
-        target_cube_quat = box_quat.squeeze(0)
-
-        current_cube_pos = root_state[cube_root_idx, 0:3]
-        current_cube_quat = root_state[cube_root_idx, 3:7]
-        alpha = 0.8
-        new_cube_pos = alpha * target_cube_pos + (1 - alpha) * current_cube_pos
-        new_cube_quat = slerp(current_cube_quat.cpu().numpy(), target_cube_quat.cpu().numpy(), alpha)
-
-        root_state[cube_root_idx, 0:3] = new_cube_pos
-        root_state[cube_root_idx, 3:7] = torch.tensor(new_cube_quat, device=box_pos.device)
-
-        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
-
-    def fix_component_2_quat(self):
-        env_ptr = self.envs[0]
-        handle = self.component_handles[2]
-        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        root_state = gymtorch.wrap_tensor(root_state)
-        idx = self.gym.get_actor_index(env_ptr, handle, gymapi.DOMAIN_SIM)
-        root_state[idx, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=root_state.device, dtype=root_state.dtype)
-        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))       
-    
+        
     # define take and place   
     def close_gripper(self):
         if self.franka_gripper_target is not None and self.franka_gripper_steps < self.franka_gripper_max_steps:
@@ -1187,8 +1053,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         cube_state_tensor = all_root_state[cube_root_idx]
         body_rb_idx = self.gym.get_actor_index(self.envs[0], body_handle, gymapi.DOMAIN_SIM)
         body_state_tensor = all_root_state[body_rb_idx]
-        wheel_pos = cube_state_tensor[0:3].unsqueeze(0).cpu().numpy()
-        # body_pos = body_state_tensor[0:3].unsqueeze(0).cpu().numpy()+ np.array([0.0, -0.146, 0.0]) 
+        wheel_pos = cube_state_tensor[0:3].unsqueeze(0).cpu().numpy() 
         body_pos = body_state_tensor[0:3].unsqueeze(0).cpu().numpy()+ np.array([0.0, -0.18, 0.0]) 
         diff = body_pos - wheel_pos
         dist = np.linalg.norm(diff)
@@ -1321,7 +1186,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         path = interpolate(start_pose, end_pose, num_steps=20)  
         self.set_franka_path(path,duration=20.0)
 
-    # action
     def _franka_take_and_place_fsm(self):
         print("FSM stage:", self.franka_task_stage)
         if self.franka_task_stage == 0:
@@ -1404,7 +1268,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             
             path = interpolate(start_pose, end_pose, num_steps=50)
             self.set_franka_path(path, duration=50.0)  
-
+    
+    # path planning
     def plan_franka_path_to_pre_grasp(self):
         print("Calling _plan_franka_path_to_pre_grasp")
         self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
@@ -1562,8 +1427,56 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self.franka_task_stage_1 = 0
                 import pdb; pdb.set_trace() 
 
+    ## mobile robots ##
+    def keep_cube_attached_to_box(self, cube_handle, box_handle):
+        # Magnetic logic, component_handles is the component, box_handles is the corresponding box.
+        if not self.component_handles or not self._box_handles:
+            return   
+        env_ptr = self.envs[0]
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        root_state = gymtorch.wrap_tensor(root_state)
 
-## mobile robot
+        cube_root_idx = self.gym.get_actor_index(env_ptr, cube_handle, gymapi.DOMAIN_SIM)
+        box_root_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
+        box_pos = root_state[box_root_idx, 0:3]
+        box_quat = root_state[box_root_idx, 3:7]
+        box_quat = box_quat.unsqueeze(0)
+        offset = torch.tensor([0.0, 0.0, 0.2], device=box_pos.device).unsqueeze(0)
+        offset_world = quat_rotate(box_quat, offset).squeeze(0)
+        target_cube_pos = box_pos + offset_world
+        target_cube_quat = box_quat.squeeze(0)
+        current_cube_pos = root_state[cube_root_idx, 0:3]
+        current_cube_quat = root_state[cube_root_idx, 3:7]
+        alpha = 0.8
+        new_cube_pos = alpha * target_cube_pos + (1 - alpha) * current_cube_pos
+        new_cube_quat = slerp(current_cube_quat.cpu().numpy(), target_cube_quat.cpu().numpy(), alpha)
+        root_state[cube_root_idx, 0:3] = new_cube_pos
+        root_state[cube_root_idx, 3:7] = torch.tensor(new_cube_quat, device=box_pos.device)
+
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
+    
+    def keep_cube_attached_to_box_1(self):
+        self.keep_cube_attached_to_box(self.component_handles[0], self._box_handles[-2])
+
+    def keep_cube_attached_to_box_2(self):
+        """body cube to wheel"""
+        self.keep_cube_attached_to_box(self.component_handles[2], self.component_cube_handles[1])
+        # offset = torch.tensor([-0.05, 0.0, 0.2], device=box_pos.device).unsqueeze(0)   #new
+        # alpha = 0.6
+ 
+    def keep_cube_attached_to_box_3(self):
+        self.keep_cube_attached_to_box(self.component_handles[1], self.component_cube_handles[0])
+
+    def fix_component_2_quat(self):
+        env_ptr = self.envs[0]
+        handle = self.component_handles[2]
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        root_state = gymtorch.wrap_tensor(root_state)
+        idx = self.gym.get_actor_index(env_ptr, handle, gymapi.DOMAIN_SIM)
+        root_state[idx, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=root_state.device, dtype=root_state.dtype)
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))       
+
+
     def _build_mobile_robots(self, env_id, env_ptr):
         col_group = env_id
         col_filter = 0
@@ -1782,7 +1695,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self._move_to_waypoint(mobile_robot_state_tensor, current_waypoint, all_root_state, step_size)
 
         if robot_to_waypoint_dist < 0.05:
-            self.keep_cube_attached_to_box()
+            self.keep_cube_attached_to_box_1()
             self.keep_cube_attached_to_box_2()
             self.keep_cube_attached_to_box_3()
             self.current_wp_idx += 1
@@ -1941,7 +1854,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             all_root_state[-2] = mobile_robot_2_state_tensor
 
     def _smart_push_box(self, robot_state, box_state, box_global_idx, target_waypoint, all_root_state, step_size, robot_id=1):
-        self.keep_cube_attached_to_box()
+        self.keep_cube_attached_to_box_1()
         self.keep_cube_attached_to_box_2()
         self.keep_cube_attached_to_box_3()
         
@@ -1969,7 +1882,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         all_root_state[robot_state_idx, 3:7] = new_quat
 
     def _move_to_waypoint(self, robot_state, waypoint, all_root_state, step_size, robot_id=1):
-        self.keep_cube_attached_to_box()
+        self.keep_cube_attached_to_box_1()
         self.keep_cube_attached_to_box_2()
         self.keep_cube_attached_to_box_3()
         
@@ -2381,11 +2294,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
 
         return
 
-
-#####################################################################
 ### =========================jit functions=========================###
-#####################################################################
-
 @torch.jit.script
 def convert_static_point_to_local_observation(point_pos, root_states, central_pos, central_rot):
     root_pos = root_states[:, 0:3]
@@ -2399,7 +2308,6 @@ def convert_static_point_to_local_observation(point_pos, root_states, central_po
     local_point_pos = quat_rotate(heading_rot, target_point_staets - root_pos)
     return local_point_pos
 
-
 @torch.jit.script
 def convert_static_point_to_world(point_pos, central_pos, central_rot):
     point_states = torch.zeros_like(central_pos[..., 0:3])
@@ -2407,7 +2315,6 @@ def convert_static_point_to_world(point_pos, central_pos, central_rot):
     rotate_point_staets = quat_rotate(central_rot, point_states)
     target_point_staets = central_pos + rotate_point_staets
     return target_point_staets
-
 
 @torch.jit.script
 def compute_carrybox_observations(root_states, box_states, tar_pos, tar_rot, box_bps, box_standing_points, tar_standing_points, density):
@@ -2474,8 +2381,6 @@ def compute_carrybox_observations(root_states, box_states, tar_pos, tar_rot, box
     box_local_rbds_pos = convert_static_point_to_local_observation(
         rbds, root_states, box_pos, box_rot)
 
-    # add bps for tar
-
     tar_local_lfus_pos = convert_static_point_to_local_observation(
         lfus, root_states, tar_pos, tar_rot)
     tar_local_lfds_pos = convert_static_point_to_local_observation(
@@ -2503,8 +2408,6 @@ def compute_carrybox_observations(root_states, box_states, tar_pos, tar_rot, box
     obs = torch.cat([tar_local_lfus_pos, tar_local_lfds_pos, tar_local_lbus_pos, tar_local_lbds_pos,
                     tar_local_rfus_pos, tar_local_rfds_pos, tar_local_rbus_pos, tar_local_rbds_pos, obs], dim=-1)
     obs = torch.cat([torch.unsqueeze(density, -1), obs], dim=-1)
-    # Do not use standing points for targets
-    # obs = torch.cat(local_tar_standing_points_pos, obs)
 
     return obs
 
@@ -2522,34 +2425,24 @@ def compute_humanoid_reset(reset_buf, progress_buf, contact_buf, contact_body_id
 
     terminated = torch.zeros_like(reset_buf)
 
-    # Early termination logic based on contact forces and body positions
     if enable_early_termination:
-        # Mask the contact forces of the lifting body parts so they're not considered
         fall_masked_contact_buf = contact_buf.clone()
         fall_masked_contact_buf[:, contact_body_ids, :] = 0
 
-        # Check if any body parts are making contact with a force above a minimal threshold
-        # to determine if a fall contact has occurred.
         fall_contact = torch.any(
             torch.abs(fall_masked_contact_buf) > 0.1, dim=-1)
         fall_contact = torch.any(fall_contact, dim=-1)
 
-        # Check if the body height of any body parts is below a certain threshold
-        # to determine if a fall due to height has occurred.
         body_height = rigid_body_pos[..., 2]
         fall_height = body_height < termination_heights
-        # Do not consider lifting body parts for the height check
         fall_height[:, contact_body_ids] = False
         fall_height = torch.any(fall_height, dim=-1)
 
-        # Combine the conditions to determine if the humanoid has fallen
         has_fallen = torch.logical_and(fall_contact, fall_height)
 
-        # check if the box is in target
         box_to_target_distance = torch.norm(box_pos - tar_pos, dim=-1)
         box_in_target = box_to_target_distance < success_threshold
 
-        # check if the humanoid is kicking the box
         box_height = box_pos[..., 2]
         delta_box_pos = box_pos - prev_box_pos
         box_vel = delta_box_pos / dt_tensor
@@ -2563,40 +2456,27 @@ def compute_humanoid_reset(reset_buf, progress_buf, contact_buf, contact_body_id
         box_kicked = torch.logical_and(box_has_velocity_horizontal, box_low)
         box_kicked_with_hands_high = torch.logical_and(box_kicked, hand_high)
 
-        # has_failed = has_fallen
-        # if forbid the agents to kick box,the agents may not know what to do.
         has_failed = torch.logical_or(has_fallen, box_kicked_with_hands_high)
 
-        # first timestep can sometimes still have nonzero contact forces
-        # so only check after first couple of steps
         has_failed *= (progress_buf > 1)
         terminated = torch.where(
             has_failed, torch.ones_like(reset_buf), terminated)
-        # terminated = torch.where(
-        #     box_in_target, torch.ones_like(reset_buf), terminated)
-
     reset = torch.where(progress_buf >= max_episode_length - 1,
                         torch.ones_like(reset_buf), terminated)
 
     return reset, terminated
 
-
 @torch.jit.script
 def compute_walk_reward(root_pos, root_rot, prev_root_pos, box_standing_pos, dt):
-    # encourage the agent to walk towards box standing points
-
     near_threshold = 0.04
     target_speed = 1.0  # target speed in m/s
     pos_err_scale = 2.0
     vel_err_scale = 2.0
 
-    # compute r_walk_pos
     box_standing_points_pos = box_standing_pos[..., 0:2]
     box_pos_diff = box_standing_points_pos - root_pos[..., 0:2]
     box_pos_err = torch.sum(box_pos_diff * box_pos_diff, dim=-1)
     box_pos_reward = torch.exp(-pos_err_scale * box_pos_err)
-
-    # compute r_walk_vel
 
     delta_root_pos = root_pos - prev_root_pos
     root_vel = delta_root_pos / dt
@@ -2608,8 +2488,6 @@ def compute_walk_reward(root_pos, root_rot, prev_root_pos, box_standing_pos, dt)
     speed_mask = box_dir_speed <= 0
     vel_reward[speed_mask] = 0
 
-    # compute r_walk_face
-
     heading_rot = torch_utils.calc_heading_quat(root_rot)
 
     facing_dir = torch.zeros_like(root_pos[..., 0:3])
@@ -2619,32 +2497,24 @@ def compute_walk_reward(root_pos, root_rot, prev_root_pos, box_standing_pos, dt)
     facing_err = torch.sum(box_dir * facing_dir[..., 0:2], dim=-1)
     facing_reward = torch.clamp_min(facing_err, 0.0)
 
-    # compute r_walk
-
     near_mask = box_pos_err <= near_threshold
     box_pos_reward[near_mask] = 1.0
     vel_reward[near_mask] = 1.0
     facing_reward[near_mask] = 1.0
 
     return box_pos_reward, vel_reward, facing_reward
-
 
 @torch.jit.script
 def compute_obs_reward(root_pos, root_rot, prev_root_pos, box_standing_pos, dt):
-    # encourage the agent to walk towards box standing points
-
     near_threshold = 0.04
     target_speed = 1.0  # target speed in m/s
     pos_err_scale = 2.0
     vel_err_scale = 2.0
 
-    # compute r_walk_pos
     box_standing_points_pos = box_standing_pos[..., 0:2]
     box_pos_diff = box_standing_points_pos - root_pos[..., 0:2]
     box_pos_err = torch.sum(box_pos_diff * box_pos_diff, dim=-1)
     box_pos_reward = torch.exp(-pos_err_scale * box_pos_err)
-
-    # compute r_walk_vel
 
     delta_root_pos = root_pos - prev_root_pos
     root_vel = delta_root_pos / dt
@@ -2656,8 +2526,6 @@ def compute_obs_reward(root_pos, root_rot, prev_root_pos, box_standing_pos, dt):
     speed_mask = box_dir_speed <= 0
     vel_reward[speed_mask] = 0
 
-    # compute r_walk_face
-
     heading_rot = torch_utils.calc_heading_quat(root_rot)
 
     facing_dir = torch.zeros_like(root_pos[..., 0:3])
@@ -2666,17 +2534,12 @@ def compute_obs_reward(root_pos, root_rot, prev_root_pos, box_standing_pos, dt):
 
     facing_err = torch.sum(box_dir * facing_dir[..., 0:2], dim=-1)
     facing_reward = torch.clamp_min(facing_err, 0.0)
-
-    # compute r_walk
-
     near_mask = box_pos_err <= near_threshold
     box_pos_reward[near_mask] = 1.0
     vel_reward[near_mask] = 1.0
     facing_reward[near_mask] = 1.0
 
     return box_pos_reward, vel_reward, facing_reward
-
-
 
 @torch.jit.script
 def compute_contact_reward(hand_positions, box_held_points, root_pos, box_standing_pos, box_pos, tar_pos):
@@ -2688,13 +2551,6 @@ def compute_contact_reward(hand_positions, box_held_points, root_pos, box_standi
     hand2box_diff = mean_hand_positions - box_held_points[..., 0:3]
     hands2box_pos_err = torch.sum(hand2box_diff * hand2box_diff, dim=-1)
     hands2box_reward = torch.exp(-held_pos_err_scale * hands2box_pos_err)
-    # compute masks when walking to box
-    # box_standing_points_pos = box_standing_pos[..., 0:2]
-    # box_pos_diff = box_standing_points_pos - root_pos[..., 0:2]
-    # box_pos_err = torch.sum(box_pos_diff * box_pos_diff, dim=-1)
-    # box_near_mask = box_pos_err <= box_near_threshold
-    # hands2box_reward[~box_near_mask] = 0.0
-    # compute masks when putdown
     box_height = box_held_points[..., 2]
     target_state_diff = tar_pos - box_pos  # xyz
     target_pos_err_xy = torch.sum(target_state_diff[..., 0:2] ** 2, dim=-1)
@@ -2704,7 +2560,6 @@ def compute_contact_reward(hand_positions, box_held_points, root_pos, box_standi
     hands2box_reward[near_and_low_mask] = 1.0
     return hands2box_reward
 
-
 @torch.jit.script
 def compute_height_reward(held_point_height):
     target_height = 0.8
@@ -2713,7 +2568,6 @@ def compute_height_reward(held_point_height):
     height_reward = torch.exp(
         -height_err_scale * box_height_diff * box_height_diff)
     return height_reward
-
 
 @torch.jit.script
 def compute_carry_reward(root_pos, root_rot, box_pos, box_rot, prev_box_pos, target_pos, target_rot, held_point_height, dt_tensor):
@@ -2727,11 +2581,9 @@ def compute_carry_reward(root_pos, root_rot, box_pos, box_rot, prev_box_pos, tar
     x_axis = torch.zeros_like(root_pos[..., 0:3])
     x_axis[..., 0] = 1.0
 
-    # masks
     box_height = box_pos[..., 2]
     height_mask = box_height < height_threshold
 
-    # compute r_carry_pos
     target_state_diff = target_pos - box_pos  # xyz
     target_pos_err_xy = torch.sum(target_state_diff[..., 0:2] ** 2, dim=-1)
     near_mask = target_pos_err_xy <= carry_dist_threshold  # near_mask
@@ -2746,16 +2598,13 @@ def compute_carry_reward(root_pos, root_rot, box_pos, box_rot, prev_box_pos, tar
     target_pos_reward_near[far_and_low_mask] = 0.0
     target_pos_reward_far[near_mask] = 1.0
 
-    # compute_r_carry_face
     tar_dir = target_pos[..., 0:2] - box_pos[..., 0:2]
     tar_dir = torch.nn.functional.normalize(tar_dir, dim=-1)
     tar_dir_reverse = box_pos[..., 0:2] - target_pos[..., 0:2]
     tar_dir_reverse = torch.nn.functional.normalize(tar_dir_reverse, dim=-1)
     root_heading_rot = torch_utils.calc_heading_quat(root_rot)
     root_facing_dir = quat_rotate(root_heading_rot, x_axis)
-    # check whether the marker is behind the agent
-    # if target is in front of the agent, then the agent should walk towards the target
-    # if target is behind the agent, then the agent should walk backward to the target
+
     front_mask = torch.sum(tar_dir * root_facing_dir[..., 0:2], dim=-1) > 0
     behind_mask = torch.sum(
         tar_dir_reverse * root_facing_dir[..., 0:2], dim=-1) > 0
@@ -2766,7 +2615,6 @@ def compute_carry_reward(root_pos, root_rot, box_pos, box_rot, prev_box_pos, tar
     facing_reward[height_mask] = 0.0
     facing_reward[near_mask] = 1.0
 
-    # compute r_carry_vel
     delta_box_pos = box_pos - prev_box_pos
     box_vel = delta_box_pos / dt_tensor
     box_tar_dir_speed = torch.sum(
@@ -2779,8 +2627,6 @@ def compute_carry_reward(root_pos, root_rot, box_pos, box_rot, prev_box_pos, tar
     tar_vel_reward[tar_speed_mask] = 0
     tar_vel_reward[height_mask] = 0.0
 
-    # compute r_carry_dir
-    # calculate the facing direction of the box
     box_facing_dir = quat_rotate(box_rot, x_axis)
     tar_facing_dir = quat_rotate(target_rot, x_axis)
     dir_err = torch.sum(
@@ -2788,22 +2634,18 @@ def compute_carry_reward(root_pos, root_rot, box_pos, box_rot, prev_box_pos, tar
     dir_reward = torch.clamp_min(dir_err, 0.0)
     dir_reward[~near_mask] = 0.0
 
-    # compute r_putdown
     held_points_height = held_point_height - target_pos[..., 2]
     put_down_height_reward = torch.exp(
         -5.0 * held_points_height * held_points_height)
     put_down_height_reward[~near_mask] = 0
     return target_pos_reward_far, tar_vel_reward, target_pos_reward_near, facing_reward, dir_reward, put_down_height_reward
 
-
 @torch.jit.script
 def compute_task_finish(box_pos, tar_pos, success_threshold):
-    # type: (Tensor, Tensor, float) -> Tensor
     pos_diff = tar_pos - box_pos
     pos_err = torch.norm(pos_diff, p=2, dim=-1)
     dist_mask = pos_err <= success_threshold
     return dist_mask
-
 
 @torch.jit.script
 def compute_box_raise_height(box_half_size, box_height):
