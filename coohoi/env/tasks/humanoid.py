@@ -430,46 +430,12 @@ class Humanoid(BaseTask):
         return
 
     def pre_physics_step(self, actions):
-        # import pdb; pdb.set_trace()
         self.actions = actions.to(self.device).clone()
         if (self._pd_control):
             pd_tar = self._action_to_pd_targets(self.actions)
 
             self.pd_tar = torch.cat((pd_tar, torch.zeros(pd_tar.shape[0], 21, device=pd_tar.device, dtype=pd_tar.dtype)), dim=-1)
             self.pd_tar_tensor = gymtorch.unwrap_tensor(self.pd_tar)
-            # self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
-
-            # dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
-            # dof_state = gymtorch.wrap_tensor(dof_state_tensor)
-
-            # import pdb; pdb.set_trace()
-            # print(pd_tar[0][24])
-
-            # dof_prop = self.gym.get_actor_dof_properties(self.envs[0], self.humanoid_handles[0])
-
-            # dof_forces = (pd_tar - self._dof_pos).cpu() * dof_prop['stiffness'] - self._dof_vel.cpu() * dof_prop['damping']
-            # dof_forces_avg = dof_forces.mean(dim=0).cpu().numpy()
-            # dof_forces_avg_df = pd.DataFrame([dof_forces_avg], columns=[f'dof_{i}' for i in range(dof_forces_avg.shape[0])])
-            # dof_forces_avg_df['timestep'] = self.record_step
-            # csv_file = 'dof_forces.csv'
-            # if self.record_step == 1:
-            #     dof_forces_avg_df.to_csv(csv_file, index=False)
-            # else:
-            #     dof_forces_avg_df.to_csv(csv_file, mode='a', header=False, index=False)
-
-            # Average the pd_tar across environments
-            # pd_tar_avg = pd_tar[0].cpu().numpy()
-
-            # Create a DataFrame with the timestep and averaged values
-            # pd_tar_df = pd.DataFrame([pd_tar_avg], columns=[f'dof_{i}' for i in range(pd_tar_avg.shape[0])])
-            # pd_tar_df['timestep'] = self.record_step
-
-            # Save the DataFrame to CSV, appending if the file exists
-            # csv_file = 'pd_tar.csv'
-            # if self.record_step == 1:
-            #     pd_tar_df.to_csv(csv_file, index=False)
-            # else:
-            #     pd_tar_df.to_csv(csv_file, mode='a', header=False, index=False)
         else:
             forces = self.actions * self.motor_efforts.unsqueeze(0) * self.power_scale
             force_tensor = gymtorch.unwrap_tensor(forces)
@@ -494,9 +460,6 @@ class Humanoid(BaseTask):
         return
 
     def render(self, sync_frame_time=False):
-        if self.viewer:
-            self._update_camera()
-
         super().render(sync_frame_time)
         return
 
@@ -542,24 +505,6 @@ class Humanoid(BaseTask):
                                  self._cam_prev_char_pos[1],
                                  1.0)
         self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
-        return
-
-    def _update_camera(self):
-        self.gym.refresh_actor_root_state_tensor(self.sim)
-        char_root_pos = self._humanoid_root_states[0, 0:3].cpu().numpy()
-        
-        cam_trans = self.gym.get_viewer_camera_transform(self.viewer, None)
-        cam_pos = np.array([cam_trans.p.x, cam_trans.p.y, cam_trans.p.z])
-        cam_delta = cam_pos - self._cam_prev_char_pos
-
-        new_cam_target = gymapi.Vec3(char_root_pos[0], char_root_pos[1], 1.0)
-        new_cam_pos = gymapi.Vec3(char_root_pos[0] + cam_delta[0], 
-                                  char_root_pos[1] + cam_delta[1], 
-                                  cam_pos[2])
-
-        self.gym.viewer_camera_look_at(self.viewer, None, new_cam_pos, new_cam_target)
-
-        self._cam_prev_char_pos[:] = char_root_pos
         return
 
     def _update_debug_viz(self):

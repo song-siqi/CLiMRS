@@ -1,6 +1,6 @@
 import os
 import wandb
-
+import sys
 from utils.config import set_np_formatting, set_seed, get_args, parse_sim_params, load_cfg
 from utils.parse_task import parse_task
 
@@ -162,6 +162,16 @@ def build_alg_runner(algo_observer):
 
 
 def main():
+    sys.argv = [
+        "run.py",
+        "--test",
+        "--task", "HumanoidAMPCarryObjectObstacle",
+        "--num_envs", "1",
+        "--cfg_env", "coohoi/data/cfg/humanoid_carrybox.yaml",
+        "--cfg_train", "coohoi/data/cfg/train/amp_humanoid_task.yaml",
+        "--motion_file", "coohoi/data/motions/coohoi_data/coohoi_data.yaml",
+        "--checkpoint", "coohoi/data/models/Humanoid.pth"
+    ]
     global args
     global cfg
     global cfg_train
@@ -217,7 +227,6 @@ def main():
         runner.run(vargs)
     elif args.test:
         vargs = vars(args)
-
         algo_observer = RLGPUAlgoObserver()
         runner = build_alg_runner(algo_observer)
         runner.load(cfg_train)

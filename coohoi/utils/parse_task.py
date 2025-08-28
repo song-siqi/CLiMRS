@@ -9,7 +9,7 @@ from env.tasks.share_humanoid_amp_carryobject import ShareHumanoidCarryObject
 from env.tasks.humanoid_amp_carryobject_obstacle import HumanoidAMPCarryObjectObstacle
 
 from isaacgym import rlgpu
-
+from env.LLM_API.llm_observer import LLMObserver
 import json
 import numpy as np
 
@@ -27,7 +27,6 @@ def parse_task(args, cfg, cfg_train, sim_params):
     cfg["seed"] = cfg_train.get("seed", -1)
     cfg_task = cfg["env"]
     cfg_task["seed"] = cfg["seed"]
-    # import pdb; pdb.set_trace()
     try:
         task = eval(args.task)(
             cfg=cfg,
@@ -36,6 +35,10 @@ def parse_task(args, cfg, cfg_train, sim_params):
             device_type=args.device,
             device_id=device_id,
             headless=args.headless)
+        llm_observer = LLMObserver()
+        llm_observer.set_task(task)
+        answer = llm_observer.update()
+        print("LLM回答：", answer)
     except NameError as e:
         print(e)
         warn_task_name()
