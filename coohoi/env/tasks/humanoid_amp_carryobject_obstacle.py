@@ -17,11 +17,12 @@ from scipy.spatial.transform import Rotation as R, Slerp
 from controllers.franka_osc_controller import FrankaOSCController
 from controllers.kinematics import FrankaIKGym
 from rrt_algorithms.planpath import plan_paths_for_cars_and_boxes, plan_paths_for_boxes_to_franka_area
+# from env.LLM_API.ask_Llm import ask_llm
 
 # TODO:
-# 3. 单LLM做多决策
-# 4. LLM prompt
+# 单LLM做多决策
 # self.component_handles[2] body
+# self.component_handles[0] first wheel   self.component_handles[1] second wheel
 
 class Pose:
     def __init__(self, pos, quat):
@@ -49,18 +50,14 @@ def convert_wz(w: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
     quat_y = torch.zeros_like(z)
     return torch.stack([quat_x, quat_y, z, w], dim=-1)
 
-
 class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
     def __init__(self, cfg, sim_params, physics_engine, device_type, device_id, headless):
-        self.API_URL = "https://api.claudeshop.top"  
-        self.API_KEY = "sk-8Ya7RPGO6cwJWVtzKXLqHtzHMzO3Ax8FnsmGSER6dPqeNKD3" 
         self.current_wp_idx = 0
         self.current_wp_idx_2 = 0
         self.current_wp_idx_3 = 0
         self.next_wp_idx = 0
 
         self.num_envs = cfg["env"]["numEnvs"]
-        # franka完成任务的次数计数器
         self.franka_counter = 0
         self.franka_count = 0
         self.absorbed = 0
@@ -100,12 +97,9 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._height_box_size = torch.zeros(self.num_envs).to(device)
         # 这个应该是按频率调用LLM
         self.target_position = torch.tensor([1.0, 7.5]).to(device)
-
         # 计算当前位置到tar的矢量方向，假设模是0.01
         self.update_pos = torch.tensor([0.02,0.02]).to(device)
-
         self.is_ask_llm = False
-
 
         self.controller = FrankaOSCController()
         urdf_path = "Agent/franka_description/robots/franka_panda.urdf"
@@ -168,22 +162,14 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         length_half_size = self._length_box_size / 2.0
         height_half_size = self._height_box_size / 2.0
 
-        lfus = torch.stack(
-            [-length_half_size, width_half_size, height_half_size], dim=1)
-        lfds = torch.stack(
-            [-length_half_size, width_half_size, -height_half_size], dim=1)
-        lbus = torch.stack(
-            [-length_half_size, -width_half_size, height_half_size], dim=1)
-        lbds = torch.stack(
-            [-length_half_size, -width_half_size, -height_half_size], dim=1)
-        rfus = torch.stack(
-            [length_half_size, width_half_size, height_half_size], dim=1)
-        rfds = torch.stack(
-            [length_half_size, width_half_size, -height_half_size], dim=1)
-        rbus = torch.stack(
-            [length_half_size, -width_half_size, height_half_size], dim=1)
-        rbds = torch.stack(
-            [length_half_size, -width_half_size, -height_half_size], dim=1)
+        lfus = torch.stack([-length_half_size, width_half_size, height_half_size], dim=1)
+        lfds = torch.stack([-length_half_size, width_half_size, -height_half_size], dim=1)
+        lbus = torch.stack([-length_half_size, -width_half_size, height_half_size], dim=1)
+        lbds = torch.stack([-length_half_size, -width_half_size, -height_half_size], dim=1)
+        rfus = torch.stack([length_half_size, width_half_size, height_half_size], dim=1)
+        rfds = torch.stack([length_half_size, width_half_size, -height_half_size], dim=1)
+        rbus = torch.stack([length_half_size, -width_half_size, height_half_size], dim=1)
+        rbds = torch.stack([length_half_size, -width_half_size, -height_half_size], dim=1)
 
         stand_points_left = torch.stack(
             [-length_half_size - 0.2, torch.zeros(self.num_envs).to(device), torch.zeros(self.num_envs).to(device)], dim=1)
@@ -194,16 +180,12 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         held_points_right = torch.stack(
             [length_half_size - width_half_size, torch.zeros(self.num_envs).to(device), torch.zeros(self.num_envs).to(device)], dim=1)
 
-        self.box_bps = torch.stack(
-            [lfus, lfds, lbus, lbds, rfus, rfds, rbus, rbds], dim=0)
+        self.box_bps = torch.stack([lfus, lfds, lbus, lbds, rfus, rfds, rbus, rbds], dim=0)
 
-        self.stand_held_points_offset = torch.stack(
-            [stand_points_left, stand_points_right, held_points_left, held_points_right], dim=0)
+        self.stand_held_points_offset = torch.stack([stand_points_left, stand_points_right, held_points_left, held_points_right], dim=0)
 
-        self._prev_root_pos = torch.zeros(
-            [self.num_envs, 3], device=self.device, dtype=torch.float)
-        self._prev_box_pos = torch.zeros(
-            [self.num_envs, 3], device=self.device, dtype=torch.float)
+        self._prev_root_pos = torch.zeros([self.num_envs, 3], device=self.device, dtype=torch.float)
+        self._prev_box_pos = torch.zeros([self.num_envs, 3], device=self.device, dtype=torch.float)
 
         lift_body_names = cfg["env"]["liftBodyNames"]
         self._lift_body_ids = self._build_lift_body_ids_tensor(lift_body_names)
@@ -943,7 +925,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self.j_eef, self.mm, cube_pos=None
         )
         u[:, 7:] = 0
-
         if self.gripper_closed:
             gripper_targets[:] = 0.01  
         else:
@@ -1084,14 +1065,13 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             return False
     
     # path planning
-    def _plan_franka_path_to_pre_grasp(self):
+    def _plan_franka_path_to_pre_grasp(self, cube_handle):
         print("Calling _plan_franka_path_to_pre_grasp")
         self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         all_root_state = gymtorch.wrap_tensor(root_state)
         
-        cube_handle = self.component_handles[0]
         cube_root_idx = self.gym.get_actor_index(self.envs[0], cube_handle, gymapi.DOMAIN_SIM)
         cube_state_tensor = all_root_state[cube_root_idx]
 
@@ -1112,13 +1092,13 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         path = interpolate(start_pose, end_pose, num_steps=50)
         self.set_franka_path(path, duration=50.0)  
 
-    def _plan_franka_path_to_grasp(self):
+    def _plan_franka_path_to_grasp(self, cube_handle):
         print("Calling _plan_franka_path_to_grasp")
         self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         all_root_state = gymtorch.wrap_tensor(root_state)
-        cube_handle = self.component_handles[0]
+        # cube_handle = self.component_handles[0]
         cube_root_idx = self.gym.get_actor_index(self.envs[0], cube_handle, gymapi.DOMAIN_SIM)
         cube_state_tensor = all_root_state[cube_root_idx]
         hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long,device=self.device)
@@ -1186,17 +1166,17 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         path = interpolate(start_pose, end_pose, num_steps=20)  
         self.set_franka_path(path,duration=20.0)
 
-    def _franka_take_and_place_fsm(self):
+    def _franka_take_and_place_fsm(self, cube_handle):
         print("FSM stage:", self.franka_task_stage)
         if self.franka_task_stage == 0:
-            self._plan_franka_path_to_pre_grasp()
+            self._plan_franka_path_to_pre_grasp(cube_handle)
             self.franka_task_stage = 1
         elif self.franka_task_stage == 1:
             finished = self._step_franka_path()
             if finished:
                 self.franka_task_stage = 2
         elif self.franka_task_stage == 2:
-            self._plan_franka_path_to_grasp()
+            self._plan_franka_path_to_grasp(cube_handle)
             self.franka_task_stage = 3
         elif self.franka_task_stage == 3:
             finished = self._step_franka_path(step_scale = 1, gap = 0.5, dist_gap = 0.0105)
@@ -1270,54 +1250,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self.set_franka_path(path, duration=50.0)  
     
     # path planning
-    def plan_franka_path_to_pre_grasp(self):
-        print("Calling _plan_franka_path_to_pre_grasp")
-        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
-        self.gym.refresh_rigid_body_state_tensor(self.sim)
-        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        all_root_state = gymtorch.wrap_tensor(root_state)
-        
-        cube_handle = self.component_handles[1]
-        cube_root_idx = self.gym.get_actor_index(self.envs[0], cube_handle, gymapi.DOMAIN_SIM)
-        cube_state_tensor = all_root_state[cube_root_idx]
-
-        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long,device=self.device)
-        cur_pos = self.franka_rb_states[hand_idxs, :3]
-        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
-        
-        self.franka_init_pos = cur_pos[0].cpu().numpy().copy()
-        self.franka_init_quat = cur_orn[0].cpu().numpy().copy()
-
-        cube_pos = cube_state_tensor[0:3].unsqueeze(0)
-        cube_quat = np.array([1.0, 0.0, 0.0, 0.0])
-
-        pre_cube_pos = cube_pos + torch.tensor([0.0, -0.04, 0.15], device=cube_pos.device, dtype=cube_pos.dtype)
-        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
-        end_pose = Pose(pre_cube_pos[0].cpu().numpy(), cube_quat)
-        
-        path = interpolate(start_pose, end_pose, num_steps=50)
-        self.set_franka_path(path, duration=50.0) 
-
-    def plan_franka_path_to_grasp(self):
-        print("Calling _plan_franka_path_to_grasp")
-        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
-        self.gym.refresh_rigid_body_state_tensor(self.sim)
-        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        all_root_state = gymtorch.wrap_tensor(root_state)
-        cube_handle = self.component_handles[1]
-        cube_root_idx = self.gym.get_actor_index(self.envs[0], cube_handle, gymapi.DOMAIN_SIM)
-        cube_state_tensor = all_root_state[cube_root_idx]
-        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long,device=self.device)
-        cur_pos = self.franka_rb_states[hand_idxs, :3]
-        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
-        cube_pos = cube_state_tensor[0:3].unsqueeze(0)
-        cube_quat = np.array([1.0, 0.0, 0.0, 0.0])
-        cube_pos = cube_pos + torch.tensor([0.0, -0.04, 0.02], device=cube_pos.device, dtype=cube_pos.dtype)
-        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
-        end_pose = Pose(cube_pos[0].cpu().numpy(), cube_quat)
-        path = interpolate(start_pose, end_pose, num_steps=10)
-        self.set_franka_path(path, duration=2.0)  
-
     def plan_franka_path_to_pre_place(self):
         self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
         self.gym.refresh_rigid_body_state_tensor(self.sim)
@@ -1370,22 +1302,21 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         lift_orn = self.franka_init_quat 
 
         start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
-        # end_pose = Pose(lift_pos[0].cpu().numpy(), lift_orn[0].cpu().numpy())
         end_pose = Pose(lift_pos, lift_orn)
         path = interpolate(start_pose, end_pose, num_steps=20)  
         self.set_franka_path(path,duration=20.0)
                 
-    def _franka_take_and_place_fsm2(self):
+    def _franka_take_and_place_fsm2(self, cube_handle):
         print("FSM stage:", self.franka_task_stage_1)
         if self.franka_task_stage_1 == 0:
-            self.plan_franka_path_to_pre_grasp()
+            self._plan_franka_path_to_pre_grasp(cube_handle)
             self.franka_task_stage_1 = 1
         elif self.franka_task_stage_1 == 1:
             finished = self._step_franka_path()
             if finished:
                 self.franka_task_stage_1 = 2
         elif self.franka_task_stage_1 == 2:
-            self.plan_franka_path_to_grasp()
+            self._plan_franka_path_to_grasp(cube_handle)
             self.franka_task_stage_1 = 3
             self.franka_task_stage = 3
         elif self.franka_task_stage_1 == 3:
@@ -1460,10 +1391,27 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
 
     def keep_cube_attached_to_box_2(self):
         """body cube to wheel"""
-        self.keep_cube_attached_to_box(self.component_handles[2], self.component_cube_handles[1])
-        # offset = torch.tensor([-0.05, 0.0, 0.2], device=box_pos.device).unsqueeze(0)   #new
-        # alpha = 0.6
- 
+        if not self.component_handles or not self.component_cube_handles:
+            return
+        env_ptr = self.envs[0]
+        cube_handle = self.component_handles[2]
+        box_handle = self.component_cube_handles[1]
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        root_state = gymtorch.wrap_tensor(root_state)
+        cube_root_idx = self.gym.get_actor_index(env_ptr, cube_handle, gymapi.DOMAIN_SIM)
+        box_root_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
+        box_pos = root_state[box_root_idx, 0:3]
+        box_quat = root_state[box_root_idx, 3:7]
+        offset = torch.tensor([0.0, 0.0, 0.2], device=box_pos.device).unsqueeze(0)   #new
+        box_quat_unsq = box_quat.unsqueeze(0)
+        offset_world = quat_rotate(box_quat_unsq, offset).squeeze(0)
+        target_cube_pos = box_pos + offset_world
+        current_cube_pos = root_state[cube_root_idx, 0:3]
+        alpha = 0.6
+        new_cube_pos = alpha * target_cube_pos + (1 - alpha) * current_cube_pos
+        root_state[cube_root_idx, 0:3] = new_cube_pos
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
+    
     def keep_cube_attached_to_box_3(self):
         self.keep_cube_attached_to_box(self.component_handles[1], self.component_cube_handles[0])
 
@@ -1475,7 +1423,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         idx = self.gym.get_actor_index(env_ptr, handle, gymapi.DOMAIN_SIM)
         root_state[idx, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=root_state.device, dtype=root_state.dtype)
         self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))       
-
 
     def _build_mobile_robots(self, env_id, env_ptr):
         col_group = env_id
@@ -1696,7 +1643,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
 
         if robot_to_waypoint_dist < 0.05:
             self.keep_cube_attached_to_box_1()
-            self.keep_cube_attached_to_box_2()
             self.keep_cube_attached_to_box_3()
             self.current_wp_idx += 1
             if self.current_wp_idx == 1:
@@ -1763,7 +1709,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self._move_to_waypoint(mobile_robot_2_state_tensor, current_waypoint, all_root_state, step_size, robot_id=2)
 
         if robot_to_waypoint_dist < 0.05:
-            self.keep_cube_attached_to_box_2()
             self.current_wp_idx_2 += 1
 
     def _update_robot_3(self, mobile_robot_3_state_tensor, component_body_state_tensor,
@@ -1847,7 +1792,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         
         if torch.norm(mobile_robot_2_state_tensor[0:2] - final_waypoints[0:2]) > 0.05:
             if torch.norm(mobile_robot_2_state_tensor[0:2] - component_wheel_2_state_tensor[0:2]) < 0.57:
-                self.keep_cube_attached_to_box_2()
                 component_wheel_2_state_tensor[0:2] += direction_2 * step_size / 2
                 all_root_state[-5] = component_wheel_2_state_tensor
             mobile_robot_2_state_tensor[0:2] += direction_2 * step_size / 2
@@ -1855,9 +1799,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
 
     def _smart_push_box(self, robot_state, box_state, box_global_idx, target_waypoint, all_root_state, step_size, robot_id=1):
         self.keep_cube_attached_to_box_1()
-        self.keep_cube_attached_to_box_2()
         self.keep_cube_attached_to_box_3()
-        
         robot_pos = robot_state[0:2]
         box_pos = box_state[0:2]
         
@@ -1883,7 +1825,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
 
     def _move_to_waypoint(self, robot_state, waypoint, all_root_state, step_size, robot_id=1):
         self.keep_cube_attached_to_box_1()
-        self.keep_cube_attached_to_box_2()
         self.keep_cube_attached_to_box_3()
         
         robot_pos = robot_state[0:2]
@@ -1902,8 +1843,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         robot_state_idx = -robot_id  
         all_root_state[robot_state_idx, 3:7] = new_quat
 
-
-    # 预留LLM接口，接受目标点选择
+    # LLM Integrated
     def _reset_target(self, env_ids):
         n = len(env_ids)
         random_numbers = torch.rand(
@@ -1980,6 +1920,36 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._target_rot[env_ids] = rand_rot
         return
 
+    def get_positions_for_prompt(self, env_id, env_ptr):
+        """return LLM API (area_positions, agent_positions)"""
+        root = self.gym.acquire_actor_root_state_tensor(self.sim)
+        root = gymtorch.wrap_tensor(root)
+        area_positions = {}
+        agent_positions = {}
+        car_handles = [self._box_handles[-1], self.mobile_handles[0], self.mobile_handles[1]]
+        box_handles = [self._box_handles[-2], self.component_cube_handles[0], self.component_cube_handles[1]]
+        for h in box_handles:
+            idx = self.gym.get_actor_index(env_ptr, h, gymapi.DOMAIN_SIM)
+            pos = root[idx, 0:3].cpu().numpy()
+            x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
+            if x >= 0 and y >= 0:
+                label = 'A'
+            elif x < 0 and y >= 0:
+                label = 'B'
+            elif x < 0 and y < 0:
+                label = 'C'
+            else:
+                label = 'D'
+            area_positions[label] = (x, y, z)
+        
+        keys = ["<wheeled robot1> (202)", "<wheeled robot2> (203)", "<wheeled robot3> (204)"]
+        for name, h in zip(keys, car_handles):
+            idx = self.gym.get_actor_index(env_ptr, h, gymapi.DOMAIN_SIM)
+            pos = root[idx, 0:2].cpu().numpy()
+            agent_positions[name] = (float(pos[0]), float(pos[1]))
+        
+        return area_positions, agent_positions
+
     def _reset_env_tensors(self, env_ids):
         super()._reset_env_tensors(env_ids)
         box_env_ids_int32 = self._box_actor_ids[env_ids]
@@ -1996,6 +1966,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         all_root_state = gymtorch.wrap_tensor(root_state)
         self.fix_component_2_quat()
+        self.keep_cube_attached_to_box_2()
 
         franka_root_idx = self.gym.get_actor_index(self.envs[0], self.franka_handles[0], gymapi.DOMAIN_SIM)
         franka_state_tensor = all_root_state[franka_root_idx]
@@ -2020,14 +1991,14 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 return
             else:
                 if self.franka_counter == 0 :
-                    self._franka_take_and_place_fsm()
+                    self._franka_take_and_place_fsm(self.component_handles[0])
                 elif self.franka_counter == 2:
-                    self._franka_take_and_place_fsm2()
+                    self._franka_take_and_place_fsm2(self.component_handles[1])
                 else:
                     self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
         else:
             if self.franka_counter == 2:
-                self._franka_take_and_place_fsm2()
+                self._franka_take_and_place_fsm2(self.component_handles[1])
             else:
                 self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
         return
@@ -2299,7 +2270,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
 def convert_static_point_to_local_observation(point_pos, root_states, central_pos, central_rot):
     root_pos = root_states[:, 0:3]
     root_rot = root_states[:, 3:7]
-
     point_states = torch.zeros_like(root_states[..., 0:3])
     point_states[:] = point_pos
     rotate_point_staets = quat_rotate(central_rot, point_states)
@@ -2321,24 +2291,19 @@ def compute_carrybox_observations(root_states, box_states, tar_pos, tar_rot, box
     root_pos = root_states[:, 0:3]
     root_rot = root_states[:, 3:7]
     heading_rot = torch_utils.calc_heading_quat_inv(root_rot)  # (num_envs, 4)
-
     box_pos = box_states[:, 0:3]
     box_rot = box_states[:, 3:7]
     box_vel = box_states[:, 7:10]
     box_ang_vel = box_states[:, 10:13]
-
     local_box_pos = box_pos - root_pos
     local_box_pos = quat_rotate(heading_rot, local_box_pos)
-
     box_standing_points_xy = box_standing_points[:, 0:3]
     box_standing_points_xy[:, 2] = 0.0
     local_box_standing_points_pos = box_standing_points_xy - root_pos
-    local_box_standing_points_pos = quat_rotate(
-        heading_rot, local_box_standing_points_pos)
+    local_box_standing_points_pos = quat_rotate(heading_rot, local_box_standing_points_pos)
 
     local_box_rot = quat_mul(heading_rot, box_rot)
     local_box_rot_obs = torch_utils.quat_to_tan_norm(local_box_rot)
-
     local_box_vel = quat_rotate(heading_rot, box_vel)
     local_box_ang_vel = quat_rotate(heading_rot, box_ang_vel)
 
@@ -2357,50 +2322,32 @@ def compute_carrybox_observations(root_states, box_states, tar_pos, tar_rot, box
     lfds = box_bps[1]
     lbus = box_bps[2]
     lbds = box_bps[3]
-
     rfus = box_bps[4]
     rfds = box_bps[5]
     rbus = box_bps[6]
     rbds = box_bps[7]
 
-    box_local_lfus_pos = convert_static_point_to_local_observation(
-        lfus, root_states, box_pos, box_rot)
-    box_local_lfds_pos = convert_static_point_to_local_observation(
-        lfds, root_states, box_pos, box_rot)
-    box_local_lbus_pos = convert_static_point_to_local_observation(
-        lbus, root_states, box_pos, box_rot)
-    box_local_lbds_pos = convert_static_point_to_local_observation(
-        lbds, root_states, box_pos, box_rot)
+    box_local_lfus_pos = convert_static_point_to_local_observation(lfus, root_states, box_pos, box_rot)
+    box_local_lfds_pos = convert_static_point_to_local_observation(lfds, root_states, box_pos, box_rot)
+    box_local_lbus_pos = convert_static_point_to_local_observation(lbus, root_states, box_pos, box_rot)
+    box_local_lbds_pos = convert_static_point_to_local_observation(lbds, root_states, box_pos, box_rot)
 
-    box_local_rfus_pos = convert_static_point_to_local_observation(
-        rfus, root_states, box_pos, box_rot)
-    box_local_rfds_pos = convert_static_point_to_local_observation(
-        rfds, root_states, box_pos, box_rot)
-    box_local_rbus_pos = convert_static_point_to_local_observation(
-        rbus, root_states, box_pos, box_rot)
-    box_local_rbds_pos = convert_static_point_to_local_observation(
-        rbds, root_states, box_pos, box_rot)
+    box_local_rfus_pos = convert_static_point_to_local_observation(rfus, root_states, box_pos, box_rot)
+    box_local_rfds_pos = convert_static_point_to_local_observation(rfds, root_states, box_pos, box_rot)
+    box_local_rbus_pos = convert_static_point_to_local_observation(rbus, root_states, box_pos, box_rot)
+    box_local_rbds_pos = convert_static_point_to_local_observation(rbds, root_states, box_pos, box_rot)
 
-    tar_local_lfus_pos = convert_static_point_to_local_observation(
-        lfus, root_states, tar_pos, tar_rot)
-    tar_local_lfds_pos = convert_static_point_to_local_observation(
-        lfds, root_states, tar_pos, tar_rot)
-    tar_local_lbus_pos = convert_static_point_to_local_observation(
-        lbus, root_states, tar_pos, tar_rot)
-    tar_local_lbds_pos = convert_static_point_to_local_observation(
-        lbds, root_states, tar_pos, tar_rot)
+    tar_local_lfus_pos = convert_static_point_to_local_observation(lfus, root_states, tar_pos, tar_rot)
+    tar_local_lfds_pos = convert_static_point_to_local_observation(lfds, root_states, tar_pos, tar_rot)
+    tar_local_lbus_pos = convert_static_point_to_local_observation(lbus, root_states, tar_pos, tar_rot)
+    tar_local_lbds_pos = convert_static_point_to_local_observation(lbds, root_states, tar_pos, tar_rot)
 
-    tar_local_rfus_pos = convert_static_point_to_local_observation(
-        rfus, root_states, tar_pos, tar_rot)
-    tar_local_rfds_pos = convert_static_point_to_local_observation(
-        rfds, root_states, tar_pos, tar_rot)
-    tar_local_rbus_pos = convert_static_point_to_local_observation(
-        rbus, root_states, tar_pos, tar_rot)
-    tar_local_rbds_pos = convert_static_point_to_local_observation(
-        rbds, root_states, tar_pos, tar_rot)
+    tar_local_rfus_pos = convert_static_point_to_local_observation(rfus, root_states, tar_pos, tar_rot)
+    tar_local_rfds_pos = convert_static_point_to_local_observation(rfds, root_states, tar_pos, tar_rot)
+    tar_local_rbus_pos = convert_static_point_to_local_observation(rbus, root_states, tar_pos, tar_rot)
+    tar_local_rbds_pos = convert_static_point_to_local_observation(rbds, root_states, tar_pos, tar_rot)
 
-    obs = torch.cat([local_box_pos, local_box_rot_obs,
-                    local_box_vel, local_box_ang_vel], dim=-1)
+    obs = torch.cat([local_box_pos, local_box_rot_obs, local_box_vel, local_box_ang_vel], dim=-1)
     obs = torch.cat([box_local_lfus_pos, box_local_lfds_pos, box_local_lbus_pos, box_local_lbds_pos,
                     box_local_rfus_pos, box_local_rfds_pos, box_local_rbus_pos, box_local_rbds_pos, obs], dim=-1)
     obs = torch.cat([local_box_standing_points_pos, obs], dim=-1)
@@ -2408,7 +2355,6 @@ def compute_carrybox_observations(root_states, box_states, tar_pos, tar_rot, box
     obs = torch.cat([tar_local_lfus_pos, tar_local_lfds_pos, tar_local_lbus_pos, tar_local_lbds_pos,
                     tar_local_rfus_pos, tar_local_rfds_pos, tar_local_rbus_pos, tar_local_rbds_pos, obs], dim=-1)
     obs = torch.cat([torch.unsqueeze(density, -1), obs], dim=-1)
-
     return obs
 
 @torch.jit.script
@@ -2617,8 +2563,7 @@ def compute_carry_reward(root_pos, root_rot, box_pos, box_rot, prev_box_pos, tar
 
     delta_box_pos = box_pos - prev_box_pos
     box_vel = delta_box_pos / dt_tensor
-    box_tar_dir_speed = torch.sum(
-        tar_dir * box_vel[..., 0:2], dim=-1)
+    box_tar_dir_speed = torch.sum(tar_dir * box_vel[..., 0:2], dim=-1)
     tar_vel_err = target_speed - box_tar_dir_speed
     tar_vel_err = torch.clamp_min(tar_vel_err, 0.0)
     tar_vel_reward = torch.exp(-carry_vel_err_scale *
