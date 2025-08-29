@@ -18,8 +18,7 @@ def warn_task_name():
     raise Exception(
         "Unrecognized task!\nTask should be one of: [BallBalance, Cartpole, CartpoleYUp, Ant, Humanoid, Anymal, FrankaCabinet, Quadcopter, ShadowHand, ShadowHandLSTM, ShadowHandFFOpenAI, ShadowHandFFOpenAITest, ShadowHandOpenAI, ShadowHandOpenAITest, Ingenuity]")
 
-def parse_task(args, cfg, cfg_train, sim_params):
-
+def parse_task(args, cfg, cfg_train, sim_params, is_ask_llm=True):
     # create native task and pass custom config
     device_id = args.device_id
     rl_device = args.rl_device
@@ -35,10 +34,11 @@ def parse_task(args, cfg, cfg_train, sim_params):
             device_type=args.device,
             device_id=device_id,
             headless=args.headless)
-        llm_observer = LLMObserver()
-        llm_observer.set_task(task)
-        answer = llm_observer.update()
-        print("LLM回答：", answer)
+        if is_ask_llm:
+            llm_observer = LLMObserver()
+            llm_observer.set_task(task)
+            answer = llm_observer.update()
+            print("LLM answer:", answer)
     except NameError as e:
         print(e)
         warn_task_name()
