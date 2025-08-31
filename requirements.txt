@@ -6,3 +6,7 @@ tensorboard==1.15.0
 wandb
 tqdm
 protobuf==3.20.1
+pybullet
+rtree
+plotly
+matplotlib
