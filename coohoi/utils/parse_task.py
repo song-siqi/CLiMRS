@@ -6,7 +6,7 @@ from env.tasks.vec_task_wrappers import VecTaskPythonWrapper
 # Tasks for CooHOI
 from env.tasks.humanoid_amp_carryobject import HumanoidAMPCarryObject
 from env.tasks.share_humanoid_amp_carryobject import ShareHumanoidCarryObject
-from env.tasks.humanoid_amp_carryobject_obstacle import HumanoidAMPCarryObjectObstacle
+from coohoi.env.tasks.humanoid_amp_carryobject_obstacle_0901 import HumanoidAMPCarryObjectObstacle
 
 from isaacgym import rlgpu
 from env.LLM_API.llm_observer import LLMObserver
