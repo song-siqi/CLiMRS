@@ -45,10 +45,10 @@ def create_rlgpu_env(**kwargs):
     sim_params = parse_sim_params(args, cfg, cfg_train)
     task, env = parse_task(args, cfg, cfg_train, sim_params)
 
-    print('num_envs: {:d}'.format(env.num_envs))
-    print('num_actions: {:d}'.format(env.num_actions))
-    print('num_obs: {:d}'.format(env.num_obs))
-    print('num_states: {:d}'.format(env.num_states))
+    # print('num_envs: {:d}'.format(env.num_envs))
+    # print('num_actions: {:d}'.format(env.num_actions))
+    # print('num_obs: {:d}'.format(env.num_obs))
+    # print('num_states: {:d}'.format(env.num_states))
 
     frames = kwargs.pop('frames', 1)
     if frames > 1:
@@ -137,8 +137,8 @@ class RLGPUEnv(vecenv.IVecEnv):
 
         if self.use_global_obs:
             info['state_space'] = self.env.state_space
-            print(info['action_space'],
-                  info['observation_space'], info['state_space'])
+            # print(info['action_space'],
+            #       info['observation_space'], info['state_space'])
         else:
             print(info['action_space'], info['observation_space'])
 

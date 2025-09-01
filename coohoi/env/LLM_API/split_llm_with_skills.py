@@ -66,56 +66,59 @@ def parse_workflow_text(text):
         })
     return results
 
+### explore area ###
 def skill_A(env, robot_name, area_name, target_name):
-    """探索区域"""
+    """explore areaA"""
     env.explore_area(robot_name, area_name)
 
 def skill_B(env, robot_name, area_name, target_name):
-    """移动到区域"""
+    """explore areaB"""
     env.move_robot(robot_name, area_name)
 
 def skill_C(env, robot_name, area_name, target_name):
-    """探索另一区域"""
+    """explore areaC"""
     env.explore_area(robot_name, area_name)
 
 def skill_D(env, robot_name, area_name, target_name):
-    """探索第四区域"""
+    """explore areaD"""
     env.explore_area(robot_name, area_name)
 
+### robot move ###
 def skill_E(env, robot_name, area_name, target_name):
-    """移动wheeled robot1"""
+    """wheeled robot1"""
     env.move_robot(robot_name, area_name)
 
 def skill_F(env, robot_name, area_name, target_name):
-    """移动wheeled robot2"""
+    """wheeled robot2"""
     env.move_robot(robot_name, area_name)
 
 def skill_G(env, robot_name, area_name, target_name):
-    """移动wheeled robot3"""
+    """wheeled robot3"""
     env.move_robot(robot_name, area_name)
 
+### humanoid ###
 def skill_H(env, robot_name, area_name, target_name):
-    """移动humanoid"""
+    """move humanoid"""
     env.walk_humanoid(robot_name, area_name)
 
 def skill_I(env, robot_name, area_name, target_name):
-    """搬运障碍物"""
+    """move obstacle"""
     env.carry_obstacle(robot_name, target_name)
 
 def skill_J(env, robot_name, area_name, target_name):
-    """wheeled robot1推动组件"""
+    """wheeled robot1 push"""
     env.push_component(robot_name, target_name)
 
 def skill_K(env, robot_name, area_name, target_name):
-    """wheeled robot2推动组件"""
+    """wheeled robot2 push"""
     env.push_component(robot_name, target_name)
 
 def skill_L(env, robot_name, area_name, target_name):
-    """wheeled robot3推动组件"""
+    """wheeled robot3 push"""
     env.push_component(robot_name, target_name)
 
 def skill_M(env, robot_name, area_name, target_name):
-    """franka检查trunk"""
+    """franka check trunk"""
     env.franka_check(robot_name, target_name)
 
 def skill_N(env, robot_name, area_name, target_name):
@@ -123,46 +126,39 @@ def skill_N(env, robot_name, area_name, target_name):
     env.franka_check(robot_name, target_name)
 
 def skill_O(env, robot_name, area_name, target_name):
-    """franka检查右轮"""
+    """franka check right wheel"""
     env.franka_check(robot_name, target_name)
 
 def skill_P(env, robot_name, area_name, target_name):
-    """franka抓取左轮"""
-    env.franka_pick(robot_name, target_name)
+    """franka pick and place left wheel"""
+    env.franka_counter = 1
 
 def skill_Q(env, robot_name, area_name, target_name):
-    """franka抓取右轮"""
-    env.franka_pick(robot_name, target_name)
+    """franka pick and place right wheel"""
+    env.franka_counter = 2
 
 def skill_R(env, robot_name, area_name, target_name):
-    """franka放置左轮到trunk上"""
-    env.franka_place(robot_name, target_name)
-
-def skill_S(env, robot_name, area_name, target_name):
-    """franka放置右轮到trunk上"""
-    env.franka_place(robot_name, target_name)
-
-def skill_T(env, robot_name, area_name, target_name):
     """franka等待"""
     env.wait_agent(robot_name)
 
-def skill_U(env, robot_name, area_name, target_name):
+def skill_S(env, robot_name, area_name, target_name):
     """humanoid等待"""
     env.wait_agent(robot_name)
 
-def skill_V(env, robot_name, area_name, target_name):
+def skill_T(env, robot_name, area_name, target_name):
     """wheeled robot1等待"""
     env.wait_agent(robot_name)
 
-def skill_W(env, robot_name, area_name, target_name):
+def skill_U(env, robot_name, area_name, target_name):
     """wheeled robot2等待"""
     env.wait_agent(robot_name)
 
-def skill_X(env, robot_name, area_name, target_name):
+def skill_V(env, robot_name, area_name, target_name):
     """wheeled robot3等待"""
     env.wait_agent(robot_name)
 
-# 技能映射字典
+
+# skill mapping
 SKILL_MAP = {
     'A': skill_A,
     'B': skill_B,
@@ -186,6 +182,6 @@ SKILL_MAP = {
     'T': skill_T,
     'U': skill_U,
     'V': skill_V,
-    'W': skill_W,
-    'X': skill_X,
+    # 'W': skill_W,
+    # 'X': skill_X,
 }

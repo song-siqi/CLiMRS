@@ -17,7 +17,7 @@ from scipy.spatial.transform import Rotation as R, Slerp
 from controllers.franka_osc_controller import FrankaOSCController
 from controllers.kinematics import FrankaIKGym
 from rrt_algorithms.planpath import plan_paths_for_cars_and_boxes, plan_paths_for_boxes_to_franka_area
-# from env.LLM_API.ask_Llm import ask_llm
+from env.LLM_API.split_llm_with_skills import parse_workflow_text, SKILL_MAP
 
 # TODO:
 # 单LLM做多决策
@@ -96,14 +96,14 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._length_box_size = torch.zeros(self.num_envs).to(device)
         self._height_box_size = torch.zeros(self.num_envs).to(device)
         # 这个应该是按频率调用LLM
+        self.llm_update = 5
         self.target_position = torch.tensor([1.0, 7.5]).to(device)
         # 计算当前位置到tar的矢量方向，假设模是0.01
         self.update_pos = torch.tensor([0.02,0.02]).to(device)
         self.is_ask_llm = False
 
         self.controller = FrankaOSCController()
-        urdf_path = "Agent/franka_description/robots/franka_panda.urdf"
-        self.ik_solver = FrankaIKGym(urdf_path)
+        self.ik_solver = FrankaIKGym()
         self.franka_task_stage = 0
         self.franka_task_stage_1 = 0
         self.franka_path = None
@@ -1601,16 +1601,16 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 nearest_box_idx = torch.argmin(dists)
                 nearest_box_pos = box_positions[nearest_box_idx].cpu().numpy()
                 
-                if nearest_box_pos[0] >= 0 and nearest_box_pos[1] >= 0:  # (4,8) 区域
+                if nearest_box_pos[0] >= 0 and nearest_box_pos[1] >= 0:  # (4,8) 
                     self._reset_car_target([0])
                     print(f"Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target")
-                elif nearest_box_pos[0] >= 0 and nearest_box_pos[1] < 0:  # (4,-8) 区域
+                elif nearest_box_pos[0] >= 0 and nearest_box_pos[1] < 0:  # (4,-8) 
                     self._reset_car_target2([0])
                     print(f"Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target2")
-                elif nearest_box_pos[0] < 0 and nearest_box_pos[1] < 0:  # (-4,-8) 区域
+                elif nearest_box_pos[0] < 0 and nearest_box_pos[1] < 0:  # (-4,-8) 
                     self._reset_car_target3([0])
                     print(f"Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target3")
-                elif nearest_box_pos[0] < 0 and nearest_box_pos[1] >= 0:  # (-4,8) 区域
+                elif nearest_box_pos[0] < 0 and nearest_box_pos[1] >= 0:  # (-4,8) 
                     self._reset_car_target4([0])
                     print(f"Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target4")
                 
@@ -1843,7 +1843,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         robot_state_idx = -robot_id  
         all_root_state[robot_state_idx, 3:7] = new_quat
 
-    # LLM Integrated
+    ## LLM Integrated ##
     def _reset_target(self, env_ids):
         n = len(env_ids)
         random_numbers = torch.rand(
@@ -1950,6 +1950,20 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         
         return area_positions, agent_positions
 
+    def execute_llm_plan(self, llm_text):
+        steps = parse_workflow_text(llm_text)
+        for step in steps:
+            self.execute_skill_step(step)
+
+    def execute_skill_step(self, step):
+        print(f"execute: {step['skill']}, robot: {step['robot_name']}, area: {step['area_name']}, target: {step['target_name']}")
+        func = SKILL_MAP.get(step['skill'])
+        if func:
+            func(self, step['robot_name'], step['area_name'], step['target_name'])
+        else:
+            print(f"uncomplish skill: {step['skill']}")
+
+
     def _reset_env_tensors(self, env_ids):
         super()._reset_env_tensors(env_ids)
         box_env_ids_int32 = self._box_actor_ids[env_ids]
@@ -1963,6 +1977,12 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         super().pre_physics_step(actions)
         self._prev_root_pos[:] = self._humanoid_root_states[..., 0:3]
         self._prev_box_pos[:] = self._box_states[..., 0:3]
+        
+        # env_state = self.get_positions_for_prompt(0, self.envs[0])
+        # if self.progress_buf[0] % self.llm_update == 0:
+        #     llm_response = self.llm.ask_llm(env_state)
+        #     self.execute_llm_plan(llm_response)
+
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         all_root_state = gymtorch.wrap_tensor(root_state)
         self.fix_component_2_quat()

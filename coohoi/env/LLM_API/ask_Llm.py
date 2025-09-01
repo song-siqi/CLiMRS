@@ -52,15 +52,13 @@ class LLMWorkflow:
                     M. [check] <franka> (606) check <trunk> (303)
                     N. [check] <franka> (606) check <left wheel> (405)
                     O. [check] <franka> (606) check <right wheel> (406)
-                    P. [pick] <franka> (606) pick <left wheel> (405)
-                    Q. [pick] <franka> (606) pick <right wheel> (406)
-                    R. [place] <franka> (606) place <left wheel> (405) on <trunk> (303)
-                    S. [place] <franka> (606) place <right wheel> (406) on <trunk> (303) 
-                    T. [wait] <franka> (606) wait
-                    U. [wait] <humanoid> (101) wait
-                    V. [wait] <wheeled robot1> (202) wait
-                    W. [wait] <wheeled robot2> (203) wait
-                    X. [wait] <wheeled robot3> (204) wait
+                    P. [pick] <franka> (606) pick and place <left wheel> (405) on <trunk> (303)
+                    Q. [pick] <franka> (606) pick and place <right wheel> (406) on <trunk> (303)
+                    R. [wait] <franka> (606) wait
+                    S. [wait] <humanoid> (101) wait
+                    T. [wait] <wheeled robot1> (202) wait
+                    U. [wait] <wheeled robot2> (203) wait
+                    V. [wait] <wheeled robot3> (204) wait
                     Answer: Let's think step by step.
                 """
 
@@ -159,9 +157,9 @@ class LLMWorkflow:
 
 
 if __name__ == "__main__":
-    print("欢迎使用问答系统！（输入 'exit' 退出）")
+    print("welcome !(input 'exit' to exit)")
     while True: 
         user_input = input()
         if user_input.lower() == "exit":
-            print("再见！")
+            print("goodbye!")
             break
