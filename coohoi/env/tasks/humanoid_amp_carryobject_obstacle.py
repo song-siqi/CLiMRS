@@ -18,6 +18,8 @@ from controllers.franka_osc_controller import FrankaOSCController
 from controllers.kinematics import FrankaIKGym
 from rrt_algorithms.planpath import plan_paths_for_cars_and_boxes, plan_paths_for_boxes_to_franka_area
 from env.LLM_API.split_llm_with_skills import parse_workflow_text, SKILL_MAP
+from env.LLM_API.gym_llm_integration import GymLLMIntegration
+from env.LLM_API.gym_llm_planning_integration import GymLLMPlanningIntegration
 
 # TODO:
 # 单LLM做多决策
@@ -96,7 +98,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._length_box_size = torch.zeros(self.num_envs).to(device)
         self._height_box_size = torch.zeros(self.num_envs).to(device)
         # 这个应该是按频率调用LLM
-        self.llm_update = 5
+        self.llm_update = 50000
         self.target_position = torch.tensor([1.0, 7.5]).to(device)
         # 计算当前位置到tar的矢量方向，假设模是0.01
         self.update_pos = torch.tensor([0.02,0.02]).to(device)
@@ -114,6 +116,13 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.gripper_closed = False
         self.control_step_counter = 0
         self.wait_counter = 0
+
+        # LLM Integration
+        self.llm_integration = None
+        self.enable_llm_control = True  # 是否启用 LLM 控制
+        
+        # LLM Planning Integration (planner + safety controller)
+        self.llm_planning_integration = None
 
         super().__init__(cfg=cfg,
                          sim_params=sim_params,
@@ -193,6 +202,17 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._build_box_tensors()
         self._build_target_state_tensors()
         self._reset_target([0])
+        
+        # 初始化 LLM 整合系统
+        if self.enable_llm_control:
+            self.llm_integration = GymLLMIntegration(self)
+            self.llm_integration.initialize()
+        
+        # 初始化 LLM 规划整合系统（结合 dev_revision 的规划 + 安全控制）
+        try:
+            self.llm_planning_integration = GymLLMPlanningIntegration(self)
+        except Exception as _e:
+            self.llm_planning_integration = None
        
     def _build_lift_body_ids_tensor(self, lift_body_names):
         env_ptr = self.envs[0]
@@ -576,6 +596,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             paths1 = plan_paths_for_cars_and_boxes(
                 self.gym, self.sim, self.device, env_ptr, root_state, car_handles, box_handles, all_obstacle_handles
             )
+            if not paths1 or any(p is None for p in paths1):
+                raise RuntimeError("RRT planning failed")
             end_positions = [p[-1] for p in paths1]
             paths2 = plan_paths_for_boxes_to_franka_area(
                 self.gym, self.sim, self.device, env_ptr, root_state, car_handles, box_handles, self.franka_handles[0], all_obstacle_handles, start_positions=end_positions
@@ -1962,7 +1984,83 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             func(self, step['robot_name'], step['area_name'], step['target_name'])
         else:
             print(f"uncomplish skill: {step['skill']}")
-
+    
+    # LLM 技能执行方法
+    def explore_area(self, robot_name, area_name):
+        """探索区域"""
+        print(f"Exploring area {area_name} with {robot_name}")
+        self._assign_waypoints_by_area(robot_name, area_name)
+        
+    def move_robot(self, robot_name, area_name):
+        """移动机器人到指定区域"""
+        print(f"Moving {robot_name} to area {area_name}")
+        self._assign_waypoints_by_area(robot_name, area_name)
+        
+    def walk_humanoid(self, robot_name, area_name):
+        """人形机器人行走"""
+        print(f"Humanoid {robot_name} walking to area {area_name}")
+        # 这里可以实现人形机器人的行走逻辑
+        
+    def carry_obstacle(self, robot_name, target_name):
+        """搬运障碍物"""
+        print(f"{robot_name} carrying obstacle {target_name}")
+        # 这里可以实现搬运逻辑
+        
+    def push_component(self, robot_name, target_name):
+        """推动组件"""
+        print(f"{robot_name} pushing component {target_name}")
+        # 这里可以实现推动逻辑
+        
+    def franka_check(self, robot_name, target_name):
+        """Franka 检查目标"""
+        print(f"Franka {robot_name} checking {target_name}")
+        
+    def wait_agent(self, robot_name):
+        """等待智能体"""
+        print(f"Agent {robot_name} waiting")
+        # 这里可以实现等待逻辑
+        
+    def _assign_waypoints_by_area(self, robot_name: str, area_name: str):
+        """将区域标签(A/B/C/D)映射为目标点，并为指定机器人设置路径点"""
+        import torch as _torch
+        area_targets = {
+            'A': _torch.tensor([4.0,  8.0], device=self.device),
+            'B': _torch.tensor([-4.0, 8.0], device=self.device),
+            'C': _torch.tensor([-4.0,-8.0], device=self.device),
+            'D': _torch.tensor([4.0, -8.0], device=self.device),
+        }
+        if area_name not in area_targets:
+            return
+        target = area_targets[area_name]
+        # 将单点作为简单路径目标
+        path = _torch.stack([target], dim=0)
+        # 解析机器人编号：'<wheeled robotX> (id)'
+        robot_id = 1
+        if 'robot1' in robot_name:
+            robot_id = 1
+        elif 'robot2' in robot_name:
+            robot_id = 2
+        elif 'robot3' in robot_name:
+            robot_id = 3
+        self._set_robot_waypoints(robot_id, path)
+        
+    def _set_robot_waypoints(self, robot_id: int, path):
+        """设置对应机器人的路径点张量。robot_id 从1开始。"""
+        if robot_id == 1:
+            self.waypoints = path
+            self.current_wp_idx = 0
+            if hasattr(self, '_waypoints_reset'):
+                self._waypoints_reset = False
+        elif robot_id == 2:
+            self.waypoints_2 = path
+            self.current_wp_idx_2 = 0
+            if hasattr(self, '_waypoints_reset_2'):
+                self._waypoints_reset_2 = False
+        elif robot_id == 3:
+            self.waypoints_3 = path
+            self.current_wp_idx_3 = 0
+            if hasattr(self, '_waypoints_reset_3'):
+                self._waypoints_reset_3 = False
 
     def _reset_env_tensors(self, env_ids):
         super()._reset_env_tensors(env_ids)
@@ -1978,10 +2076,17 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._prev_root_pos[:] = self._humanoid_root_states[..., 0:3]
         self._prev_box_pos[:] = self._box_states[..., 0:3]
         
-        # env_state = self.get_positions_for_prompt(0, self.envs[0])
-        # if self.progress_buf[0] % self.llm_update == 0:
-        #     llm_response = self.llm.ask_llm(env_state)
-        #     self.execute_llm_plan(llm_response)
+        if getattr(self, 'llm_planning_integration', None) is not None:
+            self.llm_planning_integration.update("请给出组装方案")
+        
+        if self.enable_llm_control and self.llm_integration is not None:
+            self.llm_integration.update("请给出组装方案")
+        else:
+            env_state = self.get_positions_for_prompt(0, self.envs[0])
+            if self.progress_buf[0] % self.llm_update == 0:
+                if hasattr(self, 'llm') and self.llm is not None:
+                    llm_response = self.llm.ask_llm(env_state)
+                    self.execute_llm_plan(llm_response)
 
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         all_root_state = gymtorch.wrap_tensor(root_state)
@@ -1998,27 +2103,31 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         dist0 = torch.norm(component_wheel_1_state_tensor[0:2] - franka_state_tensor[0:2])
         dist1 = torch.norm(component_wheel_2_state_tensor[0:2] - franka_state_tensor[0:2])
         dist2 = torch.norm(component_body_state_tensor[0:2] - franka_state_tensor[0:2])
+        d0 = float(dist0.item())
+        d1 = float(dist1.item())
+        d2 = float(dist2.item())
         
-        # The distance between the last part and franka
+        # The distance between parts and franka
         if self.absorbed == 1:
             self.apply_magnetic_force(range = 2.0,mag=True)
         if self.absorbed1 == 1:
             self.apply_magnetic_force_1(range = 2.0, mag=True) 
         
-        if dist0 and dist1 and dist2 < 0.6:
-            if self.wait_counter < self.wait_steps:
-                self.wait_counter += 1
-                return
-            else:
-                if self.franka_counter == 0 :
+        # Gate FSM start strictly by target component proximity
+        near_thresh = 0.6
+        if self.wait_counter < self.wait_steps:
+            self.wait_counter += 1
+        else:
+            if self.franka_counter == 0:
+                if d0 < near_thresh:
                     self._franka_take_and_place_fsm(self.component_handles[0])
-                elif self.franka_counter == 2:
+                else:
+                    self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
+            elif self.franka_counter == 2:
+                if d1 < near_thresh:
                     self._franka_take_and_place_fsm2(self.component_handles[1])
                 else:
                     self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
-        else:
-            if self.franka_counter == 2:
-                self._franka_take_and_place_fsm2(self.component_handles[1])
             else:
                 self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
         return
@@ -2085,7 +2194,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             root_states, box_states, tar_pos, tar_rot, box_bps, box_standing_points, tar_standing_points, 
             density
         )
-        # import pdb; pdb.set_trace()
 
         self.record_step += 1
         if self.log_success:
@@ -2093,14 +2201,12 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self._distance_to_target = np.array(distance_to_target.cpu().numpy())
             success_env_mask = self._distance_to_target< 0.2
             success_env_id = np.where(success_env_mask)
-            # success_step = [np.where(self._distance_to_target[i] < 0.2)[0][0] for i in success_env_id]
-            # print("Success rate: ", success_env_mask.sum() / self.num_envs)
-            # print("Success step: ", np.mean(success_step) / 30)
+
             if self._distance_to_target[success_env_mask].size > 0:
                 mean_error = self._distance_to_target[success_env_mask].mean()
             else:
                 mean_error = 100
-            # print("mean distance: ", mean_error)
+
             self.log_success_rate.append(success_env_mask.sum() / self.num_envs)
             self.log_success_precision.append(mean_error)
             print("Max Success rate: ", max(self.log_success_rate))
