@@ -16,6 +16,8 @@ from isaacgym import gymapi, gymtorch
 from LLM.dev_revision.llm_agents.feedback_agent import FeedbackAgent
 from LLM.dev_revision.arena import ArenaMultiAgent
 from .gym_llm_integration import GymLLMIntegration
+from .ask_Llm import LLMWorkflow
+from .split_llm_with_skills import parse_workflow_text, SKILL_MAP
 
 LLM_AVAILABLE = True
 
@@ -212,8 +214,21 @@ class GymLLMPlanningIntegration:
     
     def start_planning(self, task_description: str = "请给出组装方案"):
         if not self.llm_arena:
-            print("llm_arena planning system not available")
-            return False
+            try:
+                self.planning_active = True
+                self.plan_status = "planning"
+                self.planning_thread = threading.Thread(
+                    target=self._run_planning,
+                    args=(task_description,)
+                )
+                self.planning_thread.start()
+                print("LLM planning (skills workflow) started in background")
+                return True
+            except Exception as e:
+                print(f"Failed to start planning: {e}")
+                self.planning_active = False
+                self.plan_status = "idle"
+                return False
         
         try:
             self.planning_active = True
@@ -236,10 +251,50 @@ class GymLLMPlanningIntegration:
     
     def _run_planning(self, task_description: str):
         try:
-            self.current_plan = self._generate_example_plan()
+            # 优先：通过 ask_Llm 的技能列表获取可执行工作流
+            area_positions, agent_positions = {}, {}
+            try:
+                # 复用已创建的控制器观察器来获取环境状态
+                if self.llm_control_agents:
+                    any_controller = next(iter(self.llm_control_agents.values()))
+                    env_state = any_controller.get_environment_info()
+                else:
+                    # 兜底：直接创建一个轻量控制器拉取环境信息
+                    temp_ctrl = GymLLMIntegration(self.task)
+                    temp_ctrl.initialize()
+                    env_state = temp_ctrl.get_environment_info()
+                area_positions = env_state.get('area_positions', {})
+                agent_positions = env_state.get('agent_positions', {})
+            except Exception as e:
+                print(f"Failed to get environment info for planning: {e}")
+
+            decision_text = None
+            try:
+                workflow = LLMWorkflow(area_positions, agent_positions, {})
+                decision_text = workflow.ask_llm(task_description)
+            except Exception as e:
+                print(f"LLMWorkflow ask_llm failed: {e}")
+
+            plan_steps: List[Dict[str, Any]] = []
+            if isinstance(decision_text, str) and len(decision_text) > 0:
+                try:
+                    plan_steps = parse_workflow_text(decision_text)
+                except Exception as e:
+                    print(f"Failed to parse workflow text: {e}")
+
+            # 如果技能计划不可用，则退回到 arena 规划（如可用）或空计划
+            if not plan_steps and self.llm_arena:
+                try:
+                    # 调用 arena 进行一次 run 或 step 以获取高层次提示（此处保持轻量，仅作为后备）
+                    # 这里不直接阻塞调用 arena.run()，仅设置一个示意性的两步计划
+                    plan_steps = self._generate_fallback_plan()
+                except Exception as e:
+                    print(f"Arena fallback planning failed: {e}")
+
+            self.current_plan = plan_steps
             self.plan_execution_index = 0
-            self.plan_status = "executing"
-            
+            self.plan_status = "executing" if self.current_plan else "idle"
+
             print(f"Planning completed: {len(self.current_plan)} steps")
             
         except Exception as e:
@@ -247,6 +302,12 @@ class GymLLMPlanningIntegration:
             self.plan_status = "idle"
         finally:
             self.planning_active = False
+
+    def _generate_fallback_plan(self) -> List[Dict[str, Any]]:
+        return [
+            {"step": 1, "skill": "explore", "robot_name": "<wheeled robot1> (202)", "area_name": "A", "target_name": ""},
+            {"step": 2, "skill": "franka_pick_left", "robot_name": "<franka> (606)", "area_name": "", "target_name": "<left wheel> (405)"}
+        ]
     
 ###### distance -> status -> action ######
     # 更新agent状态
@@ -419,17 +480,31 @@ class GymLLMPlanningIntegration:
     
     def _execute_plan_step(self, step: Dict) -> bool:
         try:
+            # 1) 优先走技能列表执行（与 ask_Llm 的技能格式兼容）
+            if 'skill' in step and 'robot_name' in step:
+                skill_name = step.get('skill')
+                robot_name = step.get('robot_name')
+                area_name = step.get('area_name', '')
+                target_name = step.get('target_name', '')
+                print(f"Executing (skills): {skill_name}, robot: {robot_name}, area: {area_name}, target: {target_name}")
+                func = SKILL_MAP.get(skill_name)
+                if func:
+                    func(self.task, robot_name, area_name, target_name)
+                    return True
+                else:
+                    print(f"Unknown skill: {skill_name}")
+                    return False
+
             agent_id = step['agent']
             action = step['action']
-            
+            target = step.get('target')
             print(f"Executing: {agent_id} -> {action}")
-            
             if agent_id.startswith('mobile'):
-                return self._execute_mobile_robot_action(agent_id, action, step['target'])
+                return self._execute_mobile_robot_action(agent_id, action, target)
             elif agent_id == 'franka':
-                return self._execute_franka_action(action, step['target'])
+                return self._execute_franka_action(action, target)
             elif agent_id == 'humanoid':
-                return self._execute_humanoid_action(action, step['target'])
+                return self._execute_humanoid_action(action, target)
             else:
                 print(f"Unknown agent type: {agent_id}")
                 return False
@@ -521,8 +596,9 @@ class GymLLMPlanningIntegration:
             for agent_id, controller in self.llm_control_agents.items():
                 if self.current_plan and self.plan_execution_index < len(self.current_plan):
                     current_step = self.current_plan[self.plan_execution_index]
-                    if current_step['agent'] == agent_id:
-                        controller.step()
+                    step_agent = current_step.get('agent')
+                    if step_agent == agent_id:
+                        controller.update(task_description)
             
             if collision_risks:
                 print(f"⚠️  Collision risks detected: {len(collision_risks)}")
