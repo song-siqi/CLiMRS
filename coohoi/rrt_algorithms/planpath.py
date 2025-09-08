@@ -229,7 +229,7 @@ def plan_path_to_box(gym, sim, device, env_ptr, root_state, robot_handle, box_ha
     path = rrt.rrt_star_bidirectional()
       
     if path is None:
-        print("无法找到路径")
+        print("fail to find path")
         return
     if not isinstance(path, list):
         path = list(path)
@@ -329,7 +329,7 @@ def plan_path_to_franka(gym, sim, device, env_ptr, root_state, robot_handle, box
     path = rrt.rrt_star_bidirectional()
       
     if path is None:
-        print("无法找到路径")
+        print("fail to find path")
         return
     if not isinstance(path, list):
         path = list(path)

@@ -185,3 +185,12 @@ SKILL_MAP = {
     # 'W': skill_W,
     # 'X': skill_X,
 }
+
+# SKILL_MAP = {
+#     'explore': lambda env, robot, area, target: env._explore_area(robot, area),
+#     'move': lambda env, robot, area, target: env._move_to_area(robot, area),
+#     'push': lambda env, robot, area, target: env._push_object(robot, target),
+#     'carry': lambda env, robot, area, target: env._carry_object(robot, target),
+#     'check': lambda env, robot, area, target: env._check_object(robot, target),
+#     'wait': lambda env, robot, area, target: env._wait(robot)
+# }

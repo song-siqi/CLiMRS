@@ -17,6 +17,8 @@ from scipy.spatial.transform import Rotation as R, Slerp
 from controllers.franka_osc_controller import FrankaOSCController
 from controllers.kinematics import FrankaIKGym
 from rrt_algorithms.planpath import plan_paths_for_cars_and_boxes, plan_paths_for_boxes_to_franka_area
+
+from env.LLM_API.ask_Llm import LLMWorkflow
 from env.LLM_API.split_llm_with_skills import parse_workflow_text, SKILL_MAP
 from env.LLM_API.gym_llm_integration import GymLLMIntegration
 from env.LLM_API.gym_llm_planning_integration import GymLLMPlanningIntegration
@@ -97,12 +99,14 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._width_box_size = torch.zeros(self.num_envs).to(device)
         self._length_box_size = torch.zeros(self.num_envs).to(device)
         self._height_box_size = torch.zeros(self.num_envs).to(device)
-        # 这个应该是按频率调用LLM
+        
+        # LLM regarded
         self.llm_update = 50000
-        self.target_position = torch.tensor([1.0, 7.5]).to(device)
-        # 计算当前位置到tar的矢量方向，假设模是0.01
-        self.update_pos = torch.tensor([0.02,0.02]).to(device)
+        self.llm_planning_integration = GymLLMPlanningIntegration(self)
         self.is_ask_llm = False
+
+        self.target_position = torch.tensor([1.0, 7.5]).to(device)
+        self.update_pos = torch.tensor([0.02,0.02]).to(device)
 
         self.controller = FrankaOSCController()
         self.ik_solver = FrankaIKGym()
@@ -119,9 +123,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
 
         # LLM Integration
         self.llm_integration = None
-        self.enable_llm_control = True  # 是否启用 LLM 控制
-        
-        # LLM Planning Integration (planner + safety controller)
+        self.enable_llm_control = True 
         self.llm_planning_integration = None
 
         super().__init__(cfg=cfg,
@@ -203,12 +205,10 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._build_target_state_tensors()
         self._reset_target([0])
         
-        # 初始化 LLM 整合系统
         if self.enable_llm_control:
             self.llm_integration = GymLLMIntegration(self)
             self.llm_integration.initialize()
         
-        # 初始化 LLM 规划整合系统（结合 dev_revision 的规划 + 安全控制）
         try:
             self.llm_planning_integration = GymLLMPlanningIntegration(self)
         except Exception as _e:
@@ -588,6 +588,15 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         env_ptr = self.envs[0]
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         root_state = gymtorch.wrap_tensor(root_state)
+        
+        if hasattr(self, 'llm_planning_integration') and self.llm_planning_integration is not None:
+            self.llm_planning_integration.update_agent_states()
+            collision_risks = self.llm_planning_integration.check_collision_risks()
+            self.llm_planning_integration.execute_safety_control(collision_risks)
+            if any(self.llm_planning_integration.mobile_robot_stop_flags.values()):
+                print("⚠️  LLM系统检测到碰撞风险，部分小车已停止，跳过路径规划")
+                return
+        
         if not hasattr(self, '_waypoints_initialized') or not self._waypoints_initialized:
             car_handles = [self._box_handles[-1], self.mobile_handles[0], self.mobile_handles[1]]
             box_handles = [self._box_handles[-2], self.component_cube_handles[0], self.component_cube_handles[1]]
@@ -611,6 +620,11 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self.waypoints_2 = torch.tensor(paths1[1], device=self.device, dtype=torch.float32)
             self.waypoints_3 = torch.tensor(paths1[2], device=self.device, dtype=torch.float32)
             self._waypoints_initialized = True
+            self.rrt_paths = paths
+            self.rrt_paths_initial = paths1  
+            
+            if hasattr(self, 'llm_planning_integration') and self.llm_planning_integration is not None:
+                print("✅ RRT路径规划完成，LLM系统已更新")
 
     # franka location entity
     def _build_franka(self, env_id, env_ptr):
@@ -1985,31 +1999,116 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         else:
             print(f"uncomplish skill: {step['skill']}")
     
+    # env -> json
+    def get_llm_env_config(self):
+        nodes = []
+        edges = []
+
+        # mobile robots
+        mobile_handles = [self._box_handles[-1], self.mobile_handles[0], self.mobile_handles[1]]
+        if hasattr(self, 'mobile_handles'):
+            for i in enumerate(mobile_handles):
+                nodes.append({
+                    "id": 100 + i,
+                    "category": "Agents",
+                    "class_name": f"mobile_{i+1}",
+                    "properties": ["MOVABLE"],
+                    "states": []
+                })
+
+        # humanoid
+        if hasattr(self, 'humanoid_handles') and self.humanoid_handles:
+            nodes.append({
+                "id": 200,
+                "category": "Agents",
+                "class_name": "humanoid",
+                "properties": ["MOVABLE"],
+                "states": []
+            })
+
+        # franka
+        if hasattr(self, 'franka_handles') and self.franka_handles:
+            nodes.append({
+                "id": 300,
+                "category": "Agents",
+                "class_name": "franka",
+                "properties": ["ON_HIGH_SURFACE"],
+                "states": []
+            })
+
+        # 组件/物体
+        cube_handles = [self._box_handles[-2], self.component_cube_handles[0], self.component_cube_handles[1]]
+        if hasattr(self, 'component_handles'):
+            for i in enumerate(cube_handles):
+                nodes.append({
+                    "id": 400 + i,
+                    "category": "Objects",
+                    "class_name": f"component_{i+1}",
+                    "properties": ["MOVABLE"],
+                    "states": []
+                })
+
+        # 桌子/空间
+        nodes.append({
+            "id": 1,
+            "category": "Rooms",
+            "class_name": "workspace",
+            "properties": [],
+            "states": []
+        })
+        nodes.append({
+            "id": 2,
+            "category": "Furniture",
+            "class_name": "table",
+            "properties": ["LANDABLE"],
+            "states": []
+        })
+
+        # 关系举例
+        for node in nodes:
+            if node["category"] == "Agents":
+                edges.append({"from_id": node["id"], "to_id": 1, "relation_type": "INSIDE"})
+        for node in nodes:
+            if node["category"] == "Objects":
+                edges.append({"from_id": node["id"], "to_id": 2, "relation_type": "ON"})
+
+        # 任务目标和指令
+        task_goal = {
+            "on_<component_1>(401)_<table>(2)": [1, []]
+        }
+        goal_instruction = [
+            "Put <component_1>(401) on the <table>(2)."
+        ]
+
+        env_config = {
+            "init_graph": {
+                "nodes": nodes,
+                "edges": edges
+            },
+            "task_goal": task_goal,
+            "goal_instruction": goal_instruction
+        }
+        return env_config
     # LLM 技能执行方法
     def explore_area(self, robot_name, area_name):
-        """探索区域"""
         print(f"Exploring area {area_name} with {robot_name}")
         self._assign_waypoints_by_area(robot_name, area_name)
         
     def move_robot(self, robot_name, area_name):
-        """移动机器人到指定区域"""
         print(f"Moving {robot_name} to area {area_name}")
         self._assign_waypoints_by_area(robot_name, area_name)
         
     def walk_humanoid(self, robot_name, area_name):
         """人形机器人行走"""
         print(f"Humanoid {robot_name} walking to area {area_name}")
-        # 这里可以实现人形机器人的行走逻辑
         
     def carry_obstacle(self, robot_name, target_name):
         """搬运障碍物"""
         print(f"{robot_name} carrying obstacle {target_name}")
-        # 这里可以实现搬运逻辑
         
     def push_component(self, robot_name, target_name):
         """推动组件"""
         print(f"{robot_name} pushing component {target_name}")
-        # 这里可以实现推动逻辑
         
     def franka_check(self, robot_name, target_name):
         """Franka 检查目标"""
@@ -2018,7 +2117,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
     def wait_agent(self, robot_name):
         """等待智能体"""
         print(f"Agent {robot_name} waiting")
-        # 这里可以实现等待逻辑
         
     def _assign_waypoints_by_area(self, robot_name: str, area_name: str):
         """将区域标签(A/B/C/D)映射为目标点，并为指定机器人设置路径点"""
@@ -2045,7 +2143,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._set_robot_waypoints(robot_id, path)
         
     def _set_robot_waypoints(self, robot_id: int, path):
-        """设置对应机器人的路径点张量。robot_id 从1开始。"""
         if robot_id == 1:
             self.waypoints = path
             self.current_wp_idx = 0
@@ -2061,6 +2158,186 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self.current_wp_idx_3 = 0
             if hasattr(self, '_waypoints_reset_3'):
                 self._waypoints_reset_3 = False
+
+    def _check_llm_safety_and_update(self, robot_id=1):
+        if hasattr(self, 'llm_planning_integration') and self.llm_planning_integration is not None:
+            self.llm_planning_integration.update_agent_states()
+            collision_risks = self.llm_planning_integration.check_collision_risks()
+            self.llm_planning_integration.execute_safety_control(collision_risks)
+            robot_key = f'mobile_{robot_id-1}'
+            return self.llm_planning_integration.mobile_robot_stop_flags.get(robot_key, False)
+        return False
+    
+    def _get_rrt_path(self, robot_id=1, path_type="initial"):
+        if not hasattr(self, '_waypoints_initialized') or not self._waypoints_initialized:
+            return None
+        
+        if path_type == "initial":
+            if robot_id == 1 and hasattr(self, 'waypoints') and self.waypoints is not None:
+                return self.waypoints
+            elif robot_id == 2 and hasattr(self, 'waypoints_2') and self.waypoints_2 is not None:
+                return self.waypoints_2
+            elif robot_id == 3 and hasattr(self, 'waypoints_3') and self.waypoints_3 is not None:
+                return self.waypoints_3
+        elif path_type == "complete":
+            if hasattr(self, 'rrt_paths') and self.rrt_paths is not None:
+                if robot_id == 1 and len(self.rrt_paths) > 0:
+                    return torch.tensor(self.rrt_paths[0], device=self.device, dtype=torch.float32)
+                elif robot_id == 2 and len(self.rrt_paths) > 1:
+                    return torch.tensor(self.rrt_paths[1], device=self.device, dtype=torch.float32)
+                elif robot_id == 3 and len(self.rrt_paths) > 2:
+                    return torch.tensor(self.rrt_paths[2], device=self.device, dtype=torch.float32)
+        
+        return None
+    
+    def _is_robot_stopped_by_llm(self, robot_id=1):
+        if hasattr(self, 'llm_planning_integration') and self.llm_planning_integration is not None:
+            robot_key = f'mobile_{robot_id-1}'
+            return self.llm_planning_integration.mobile_robot_stop_flags.get(robot_key, False)
+        return False
+    
+    def _get_safe_path_for_robot(self, robot_id=1, path_type="return"):
+        is_stopped = self._is_robot_stopped_by_llm(robot_id)
+        
+        rrt_path = self._get_rrt_path(robot_id, "initial")
+        if rrt_path is not None:
+            if is_stopped:
+                rrt_path_np = rrt_path.cpu().numpy()
+                safe_path = self._add_safety_waypoints(rrt_path_np, robot_id)
+                return torch.tensor(safe_path, device=self.device, dtype=torch.float32)
+            else:
+                return rrt_path
+        
+        if path_type == "return":
+            if robot_id == 1:
+                if is_stopped:
+                    return torch.tensor(
+                        [
+                        [5.0, 8.0],
+                        [3.0, 8.0],  
+                        [1.0, 8.0],
+                        [1.4, 8.0],
+                        [1.4, 9.0],
+                        [0.405, 9.0],
+                        [0.405, -1.95]
+                        ], device=self.device)
+                else:
+                    return torch.tensor(
+                        [
+                        [5.0, 8.0],
+                        [1.0, 8.0],
+                        [1.4, 8.0],
+                        [1.4, 9.0],
+                        [0.405, 9.0],
+                        [0.405, -1.95]
+                        ], device=self.device)
+            elif robot_id == 2:
+                if is_stopped:
+                    return torch.tensor(
+                        [
+                            [4.0, -9.0],
+                            [4.0, -6.0],  
+                            [4.0, -3.5],
+                            [4.0, -4.5],
+                            [5.0, -4.5],
+                            [5.0, -3.0],
+                            [1.0, -3.0],
+                        ], device=self.device)
+                else:
+                    return torch.tensor(
+                        [
+                            [4.0, -9.0],
+                            [4.0, -3.5],
+                            [4.0, -4.5],
+                            [5.0, -4.5],
+                            [5.0, -3.0],
+                            [1.0, -3.0],
+                        ], device=self.device)
+            elif robot_id == 3:
+                if is_stopped:
+                    return torch.tensor(
+                        [
+                            [-5.0, -8.0],
+                            [-3.0, -8.0],  
+                            [-0.8, -8.0],
+                            [-2.0, -8.0],
+                            [-2.0, -9.0],
+                            [-0.2, -9.0],
+                            [-0.2, -4.25]
+                        ], device=self.device)
+                else:
+                    return torch.tensor(
+                        [
+                            [-5.0, -8.0],
+                            [-0.8, -8.0],
+                            [-2.0, -8.0],
+                            [-2.0, -9.0],
+                            [-0.2, -9.0],
+                            [-0.2, -4.25]
+                        ], device=self.device)
+        return torch.tensor([], device=self.device)
+    
+    def _add_safety_waypoints(self, rrt_path, robot_id):
+        if len(rrt_path) < 2:
+            return rrt_path
+        
+        safe_path = []
+        for i in range(len(rrt_path) - 1):
+            current_point = rrt_path[i]
+            next_point = rrt_path[i + 1]
+            
+            safe_path.append(current_point)
+            
+            distance = np.linalg.norm(next_point - current_point)
+            
+            if distance > 2.0: 
+                mid_point = (current_point + next_point) / 2
+                safe_path.append(mid_point)
+        
+        safe_path.append(rrt_path[-1])
+        
+        if robot_id == 1:
+            if len(safe_path) > 0:
+                start_point = safe_path[0]
+                safe_start = start_point + np.array([0.5, 0.5]) 
+                safe_path.insert(0, safe_start)
+        elif robot_id == 2:
+            if len(safe_path) > 0:
+                start_point = safe_path[0]
+                safe_start = start_point + np.array([0.3, -0.3])  
+                safe_path.insert(0, safe_start)
+        elif robot_id == 3:
+            if len(safe_path) > 0:
+                start_point = safe_path[0]
+                safe_start = start_point + np.array([-0.3, 0.3])  
+                safe_path.insert(0, safe_start)
+        
+        return np.array(safe_path)
+    
+    def _update_mobile_robots(self):
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        
+        mobile_robot_state_tensor = all_root_state[-1]
+        mobile_robot_2_state_tensor = all_root_state[-2]
+        mobile_robot_3_state_tensor = all_root_state[-3]
+        component_wheel_1_state_tensor = all_root_state[-14]
+        component_wheel_2_state_tensor = all_root_state[-5]
+        component_body_state_tensor = all_root_state[-6]
+        
+        step_size = torch.norm(self.update_pos)
+        
+        self._update_robot_1(mobile_robot_state_tensor, component_wheel_1_state_tensor, 
+                            component_wheel_2_state_tensor, component_body_state_tensor, 
+                            all_root_state, step_size)
+        
+        self._update_robot_2(mobile_robot_2_state_tensor, component_wheel_2_state_tensor,
+                            all_root_state, step_size)
+        
+        self._update_robot_3(mobile_robot_3_state_tensor, component_body_state_tensor,
+                            all_root_state, step_size)
+        
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(all_root_state))
 
     def _reset_env_tensors(self, env_ids):
         super()._reset_env_tensors(env_ids)
@@ -2080,7 +2357,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self.llm_planning_integration.update("请给出组装方案")
         
         if self.enable_llm_control and self.llm_integration is not None:
-            self.llm_integration.update("请给出组装方案")
+            if self.progress_buf[0] % self.llm_update == 0:
+                self.llm_integration.update("请给出组装方案")
         else:
             env_state = self.get_positions_for_prompt(0, self.envs[0])
             if self.progress_buf[0] % self.llm_update == 0:
