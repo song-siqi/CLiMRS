@@ -20,12 +20,22 @@ class GymEnvironmentObserver:
         env_id = 0
         env_ptr = self.task.envs[0]
         
+        # 使用task的方法获取位置，确保一致性并更新缓存
+        if hasattr(self.task, 'get_positions_for_prompt'):
+            area_positions, agent_positions = self.task.get_positions_for_prompt(env_id, env_ptr)
+        else:
+            # 兜底方案
+            root_state = self.task.gym.acquire_actor_root_state_tensor(self.task.sim)
+            all_root_state = gymtorch.wrap_tensor(root_state)
+            area_positions = self._get_area_positions(env_ptr, all_root_state)
+            agent_positions = self._get_agent_positions(env_ptr, all_root_state)
+        
         root_state = self.task.gym.acquire_actor_root_state_tensor(self.task.sim)
         all_root_state = gymtorch.wrap_tensor(root_state)
         
         state_info = {
-            'area_positions': self._get_area_positions(env_ptr, all_root_state),
-            'agent_positions': self._get_agent_positions(env_ptr, all_root_state),
+            'area_positions': area_positions,
+            'agent_positions': agent_positions,
             'component_positions': self._get_component_positions(env_ptr, all_root_state),
             'obstacle_positions': self._get_obstacle_positions(env_ptr, all_root_state),
             'franka_state': self._get_franka_state(env_ptr, all_root_state),
@@ -162,7 +172,7 @@ class LLMDecisionExecutor:
     
     def execute_decision(self, decision_text: str) -> bool:
         try:
-            steps = parse_workflow_text(decision_text)
+            steps = parse_workflow_text(decision_text, None)  # 在这个上下文中没有area_positions
             
             for step in steps:
                 self.execute_skill_step(step)

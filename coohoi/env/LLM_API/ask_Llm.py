@@ -24,31 +24,36 @@ class LLMWorkflow:
         }
         # instruction head + goal description + state description + action list
         prompt = """{}
-                    You are an expert in robotics, now we urgently need to use wheeled robots, 
-                    humanoid robots and mechanical arm (franka) to jointly complete a small robot assembly task. 
-                    Please help me design the fastest workflow to complete this task based on the skills provided by the following robots, and every step you should give the Skill list number, like A., S.. 
-                    Please note that all skills and objects are represented by <name> (id), for example, <humanoid> (101).
-                    Goal Description: Locate all the parts that need to be assembled (a total of 3), including 1 <trunk> (303) and 2 wheels <left wheel> (405), <right wheel> (406), 
-                    and move the parts to the side of the <franka> (606) to achieve sequential assembly.
+                           You are an expert in robotics, now we urgently need to use wheeled robots, 
+                           humanoid robots and mechanical arm (franka) to jointly complete a small robot assembly task. 
+                           Please help me design the fastest workflow to complete this task based on the skills provided by the following robots, and every step you should give the Skill list number, like A., S.. 
+                           Please note that all skills and objects are represented by <name> (id), for example, <humanoid> (101).
+                           Goal Description: Locate all the parts that need to be assembled (a total of 3), including 1 <trunk> (303) and 2 wheels <left wheel> (405), <right wheel> (406), 
+                           and move the parts to the side of the <franka> (606) to achieve sequential assembly.
+                           
+                           WORKFLOW LOGIC:
+                           1. First: Use A/B/C/D skills to explore different areas and find components
+                           2. Second: Use E/F/G skills to move robots to franka area for component delivery
+                           3. Third: Use J/K/L skills to push components to franka for assembly
                     State Description:
-                    unknown area: <A> (001), <B> (002), <C> (003), <D> (004), where A,B,C,D represent the first to the fourth quadrants respectively.
                     component list: <trunk> (303), <left wheel> (405), <right wheel> (406), <obstacles> (507).
                     agent list: <wheeled robot1> (202),<wheeled robot2> (203),<wheeled robot3> (204), <humanoid> (101), <franka> (606).
-                    init state: <wheeled robot1> (202) is close to <A> (001), <wheeled robot2> (203) is close to <B> (002), <wheeled robot3> (204) is close to <D> (004),
-                                <humanoid> (101) is (0.0, 0.0), <franka> (606) is fixed in (0.0, -2.0).
+                    franka position: <franka> (606) is fixed in (0.0, -2.0).
+                    Current Environment Observation:
+                    {}
                     Skill list:
-                    A. [explore] area <A> (001)
-                    B. [explore] area <B> (002)
-                    C. [explore] area <C> (003)
-                    D. [explore] area <D> (004)
-                    E. [move] <wheeled robot1> (202) move to selected area
-                    F. [move] <wheeled robot2> (203) move to selected area
-                    G. [move] <wheeled robot3> (204) move to selected area
+                    A. [observe] area <A> (001) - only observe, robot doesn't move
+                    B. [observe] area <B> (002) - only observe, robot doesn't move  
+                    C. [observe] area <C> (003) - only observe, robot doesn't move
+                    D. [observe] area <D> (004) - only observe, robot doesn't move
+                    E. [move] <wheeled robot1> (202) move to component location using RRT path
+                    F. [move] <wheeled robot2> (203) move to component location using RRT path
+                    G. [move] <wheeled robot3> (204) move to component location using RRT path
                     H. [walk] <humanoid> (101) move to selected area
                     I. [carry] <humanoid> (101) carry <obstacles> (507)
-                    J. [push] <wheeled robot1> (202) push selected component
-                    K. [push] <wheeled robot2> (203) push selected component
-                    L. [push] <wheeled robot3> (204) push selected component
+                    J. [push] <wheeled robot1> (202) push selected component to franka area
+                    K. [push] <wheeled robot2> (203) push selected component to franka area
+                    L. [push] <wheeled robot3> (204) push selected component to franka area
                     M. [check] <franka> (606) check <trunk> (303)
                     N. [check] <franka> (606) check <left wheel> (405)
                     O. [check] <franka> (606) check <right wheel> (406)
@@ -63,8 +68,9 @@ class LLMWorkflow:
                 """
 
         formatted_question = self.build_prompt_with_positions(question)
-        prompt_filled = prompt.format(formatted_question)
+        prompt_filled = prompt.format(question, formatted_question)
         prompt_filled = self.replace_placeholders_with_positions(prompt_filled)
+        
 
         payload = json.dumps({
             "model":"gpt-4o-mini",
@@ -75,24 +81,39 @@ class LLMWorkflow:
 
         try:
             response = requests.post(self.API_URL, headers=headers, data=payload)
-            response = response.json()
-            return response.get("choices", [])[0].get("message", {}).get("content", "")
+            response_json = response.json()
+            content = response_json.get("choices", [])[0].get("message", {}).get("content", "")
+            return content
         except Exception as e:
+            print(f"LLM API call failed: {e}")
             return f"Error: {e}"
 
     def build_prompt_with_positions(self, question: str) -> str:
-        s = question + "\n"
+        env_obs = ""
+        print(f"🔍 LLM环境观察 - area_positions: {self.area_positions}")
+        print(f"🔍 LLM环境观察 - agent_positions: {self.agent_positions}")
+        
         if self.area_positions:
-            s += "Observed area positions:\n"
+            env_obs += "Components found in areas:\n"
             for k, v in self.area_positions.items():
                 if v is None or any(x is None for x in v):
                     continue
-                s += f"<{k}> ({100 + ord(k)}) at ({v[0]:.2f}, {v[1]:.2f}, {v[2]:.2f})\n"
+                env_obs += f"- Area <{k}> ({100 + ord(k)}): component at ({v[0]:.2f}, {v[1]:.2f}, {v[2]:.2f})\n"
+        else:
+            env_obs += "No components detected in any area yet.\n"
+            
         if self.agent_positions:
-            s += "Agent positions:\n"
+            env_obs += "Current agent positions:\n"
             for name, pos in self.agent_positions.items():
-                s += f"{name} at ({pos[0]:.2f}, {pos[1]:.2f})\n"
-        return s
+                env_obs += f"- {name} at ({pos[0]:.2f}, {pos[1]:.2f})\n"
+                
+        if self.area_positions:
+            areas_with_components = list(self.area_positions.keys())
+            env_obs += f"\n🚨 CRITICAL STRATEGY: ONLY explore these areas with components: {areas_with_components}.\n"
+            env_obs += f"🚫 DO NOT explore area A if it's not in this list. Skip empty areas completely!\n"
+        
+        print(f"📝 传递给LLM的环境观察信息:\n{env_obs}")
+        return env_obs  
 
     def replace_placeholders_with_positions(self, text: str):
         if not self.area_positions:
