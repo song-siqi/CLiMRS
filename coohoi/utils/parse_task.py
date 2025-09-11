@@ -6,7 +6,7 @@ from env.tasks.vec_task_wrappers import VecTaskPythonWrapper
 # Tasks for CooHOI
 from env.tasks.humanoid_amp_carryobject import HumanoidAMPCarryObject
 from env.tasks.share_humanoid_amp_carryobject import ShareHumanoidCarryObject
-from env.tasks.humanoid_amp_carryobject_obstacle import HumanoidAMPCarryObjectObstacle
+from coohoi.env.tasks.humanoid_amp_carryobject_obstacle import HumanoidAMPCarryObjectObstacle
 
 from isaacgym import rlgpu
 from env.LLM_API.llm_observer import LLMObserver
@@ -18,7 +18,7 @@ def warn_task_name():
     raise Exception(
         "Unrecognized task!\nTask should be one of: [BallBalance, Cartpole, CartpoleYUp, Ant, Humanoid, Anymal, FrankaCabinet, Quadcopter, ShadowHand, ShadowHandLSTM, ShadowHandFFOpenAI, ShadowHandFFOpenAITest, ShadowHandOpenAI, ShadowHandOpenAITest, Ingenuity]")
 
-def parse_task(args, cfg, cfg_train, sim_params, is_ask_llm=True):
+def parse_task(args, cfg, cfg_train, sim_params, is_ask_llm=False):
     # create native task and pass custom config
     device_id = args.device_id
     rl_device = args.rl_device

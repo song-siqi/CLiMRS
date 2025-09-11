@@ -1882,6 +1882,48 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         robot_state_idx = -robot_id  
         all_root_state[robot_state_idx, 3:7] = new_quat
 
+    def _reset_target(self, env_ids):
+        n = len(env_ids)
+        random_numbers = torch.rand(
+                [n], dtype=self._target_pos.dtype, device=self._target_pos.device)
+        
+        # rand_theta = 2 * np.pi * random_numbers
+        rand_theta = np.pi *torch.tensor(0.2,device=self._target_pos.device)
+        if self.is_ask_llm:
+        # 换成英文，强调严格按照规定格式，看作成功率，输出结构化
+            answer = self.ask_llm(f"当前有一个差速机器人要移动到目标点:[3.5,7.5]，但是在{self._box_states[env_ids, 0]}处有一个障碍物，并且在[4.0,6.0]处有一个长方体障碍物，尺寸为[1.0,5.0]，人形只能对小障碍物做搬运，不能搬运长方体，请考虑效率，给出想要把障碍物搬运到的目标点，只输出坐标")
+            match = re.search(r'\\boxed\{([^\}]+)\}', answer)
+            # import pdb; pdb.set_trace()
+            ans = match.group(1)
+            ans = re.search(r'\[([^\]]+)\]', ans)
+            coordinates = ans.group(1).split(',')
+
+            # 将字符串转换为浮点数
+            x = float(coordinates[0].strip())
+            y = float(coordinates[1].strip())
+
+            self._target_pos[env_ids, 0] = torch.tensor(x)
+            self._target_pos[env_ids, 1] = torch.tensor(y)
+
+            print(f"目标点坐标为：{x},{y}")
+        else:
+            # rand_dist = (self._target_dist_max - self._target_dist_min) * torch.rand(
+            #     [n], dtype=self._target_pos.dtype, device=self._target_pos.device) + self._target_dist_min
+            # self._target_pos[env_ids, 0] = rand_dist * \
+            #     torch.cos(rand_theta) + self._box_states[env_ids, 0]
+            # self._target_pos[env_ids, 1] = rand_dist * \
+            #     torch.sin(rand_theta) + self._box_states[env_ids, 1]
+            self._target_pos[env_ids, 0] = 4.0
+            self._target_pos[env_ids, 1] = 4.0
+            
+        self._target_pos[env_ids, 2] = self._height_box_size[env_ids] / 2.0
+        
+        axis = torch.tensor(
+            [0.0, 0.0, 1.0], dtype=self._target_pos.dtype, device=self._target_pos.device)
+        rand_rot = quat_from_angle_axis(rand_theta, axis)
+        self._target_rot[env_ids] = rand_rot
+        return
+
     ## LLM Integrated ##
     def get_positions_for_prompt(self, env_id, env_ptr):
         """return LLM API (area_positions, agent_positions)"""
@@ -1916,96 +1958,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         
         return area_positions, agent_positions
 
-    # env -> json
-    def get_llm_env_config(self):
-        nodes = []
-        edges = []
-
-
-        mobile_handles = [self.mobile_handles[0], self.mobile_handles[1], self.mobile_handles[2]]
-        if hasattr(self, 'mobile_handles'):
-            for i in enumerate(mobile_handles):
-                nodes.append({
-                    "id": 100 + i,
-                    "category": "Agents",
-                    "class_name": f"mobile_{i+1}",
-                    "properties": ["MOVABLE"],
-                    "states": []
-                })
-
-        # humanoid
-        if hasattr(self, 'humanoid_handles') and self.humanoid_handles:
-            nodes.append({
-                "id": 200,
-                "category": "Agents",
-                "class_name": "humanoid",
-                "properties": ["MOVABLE"],
-                "states": []
-            })
-
-        # franka
-        if hasattr(self, 'franka_handles') and self.franka_handles:
-            nodes.append({
-                "id": 300,
-                "category": "Agents",
-                "class_name": "franka",
-                "properties": ["ON_HIGH_SURFACE"],
-                "states": []
-            })
-
-        # 组件/物体
-        cube_handles = [self.component_cube_handles[0], self.component_cube_handles[1], self.component_cube_handles[2]]
-        if hasattr(self, 'component_handles'):
-            for i in enumerate(cube_handles):
-                nodes.append({
-                    "id": 400 + i,
-                    "category": "Objects",
-                    "class_name": f"component_{i+1}",
-                    "properties": ["MOVABLE"],
-                    "states": []
-                })
-
-        # 桌子/空间
-        nodes.append({
-            "id": 1,
-            "category": "Rooms",
-            "class_name": "workspace",
-            "properties": [],
-            "states": []
-        })
-        nodes.append({
-            "id": 2,
-            "category": "Furniture",
-            "class_name": "table",
-            "properties": ["LANDABLE"],
-            "states": []
-        })
-
-        # 关系举例
-        for node in nodes:
-            if node["category"] == "Agents":
-                edges.append({"from_id": node["id"], "to_id": 1, "relation_type": "INSIDE"})
-        for node in nodes:
-            if node["category"] == "Objects":
-                edges.append({"from_id": node["id"], "to_id": 2, "relation_type": "ON"})
-
-        # 任务目标和指令
-        task_goal = {
-            "on_<component_1>(401)_<table>(2)": [1, []]
-        }
-        goal_instruction = [
-            "Put <component_1>(401) on the <table>(2)."
-        ]
-
-        env_config = {
-            "init_graph": {
-                "nodes": nodes,
-                "edges": edges
-            },
-            "task_goal": task_goal,
-            "goal_instruction": goal_instruction
-        }
-        return env_config
     # LLM 技能执行方法
     def explore_area(self, robot_name, area_name):
         print(f"🔍 Exploring area {area_name} with {robot_name}")
