@@ -215,7 +215,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         try:
             self.llm_planning_integration = GymLLMPlanningIntegration(self)
         except Exception as _e:
-            self.llm_planning_integration = None         
+            self.llm_planning_integration = None
+            
        
     def _build_lift_body_ids_tensor(self, lift_body_names):
         env_ptr = self.envs[0]
@@ -1256,37 +1257,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self.franka_count = 1
                 if hasattr(self, 'franka_path') and self.franka_path:
                     pose = self.franka_path[-1]
-                    self.path_follow(pose)
-                    
-                
-            
-    def _plan_franka_path_to_pre_grasp(self):
-        print("Calling _plan_franka_path_to_pre_grasp")
-        self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
-        self.gym.refresh_rigid_body_state_tensor(self.sim)
-        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        all_root_state = gymtorch.wrap_tensor(root_state)
-        
-        cube_handle = self.component_handles[0]
-        cube_root_idx = self.gym.get_actor_index(self.envs[0], cube_handle, gymapi.DOMAIN_SIM)
-        cube_state_tensor = all_root_state[cube_root_idx]
-
-        hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long,device=self.device)
-        cur_pos = self.franka_rb_states[hand_idxs, :3]
-        cur_orn = self.franka_rb_states[hand_idxs, 3:7]
-        
-        self.franka_init_pos = cur_pos[0].cpu().numpy().copy()
-        self.franka_init_quat = cur_orn[0].cpu().numpy().copy()
-
-        cube_pos = cube_state_tensor[0:3].unsqueeze(0)
-        cube_quat = np.array([1.0, 0.0, 0.0, 0.0])
-
-        pre_cube_pos = cube_pos + torch.tensor([0.0, -0.04, 0.15], device=cube_pos.device, dtype=cube_pos.dtype)
-        start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
-        end_pose = Pose(pre_cube_pos[0].cpu().numpy(), cube_quat)
-        
-        path = interpolate(start_pose, end_pose, num_steps=50)
-        self.set_franka_path(path, duration=50.0)  
+                    self.path_follow(pose)               
     
     # path planning
     def plan_franka_path_to_pre_place(self):
@@ -1924,6 +1895,40 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._target_rot[env_ids] = rand_rot
         return
 
+    def _reset_target2(self, env_ids):
+        n = len(env_ids)
+        random_numbers = torch.rand(
+                [n], dtype=self._target_pos.dtype, device=self._target_pos.device)
+        rand_theta = 2 * np.pi * random_numbers
+        if self.is_ask_llm:
+        # 换成英文，强调严格按照规定格式，看作成功率，输出结构化
+            answer = self.ask_llm(f"当前有一个差速机器人要移动到目标点:[3.5,7.5]，但是在{self._box_states[env_ids, 0]}处有一个障碍物，并且在[4.0,6.0]处有一个长方体障碍物，尺寸为[1.0,5.0]，人形只能对小障碍物做搬运，不能搬运长方体，请考虑效率，给出想要把障碍物搬运到的目标点，只输出坐标")
+            match = re.search(r'\\boxed\{([^\}]+)\}', answer)
+            # import pdb; pdb.set_trace()
+            ans = match.group(1)
+            ans = re.search(r'\[([^\]]+)\]', ans)
+            coordinates = ans.group(1).split(',')
+
+            # 将字符串转换为浮点数
+            x = float(coordinates[0].strip())
+            y = float(coordinates[1].strip())
+
+            self._target_pos[env_ids, 0] = torch.tensor(x)
+            self._target_pos[env_ids, 1] = torch.tensor(y)
+
+            print(f"目标点坐标为：{x},{y}")
+        else:
+            self._target_pos[env_ids, 0] = -2.0
+            self._target_pos[env_ids, 1] = 4.0
+            
+        self._target_pos[env_ids, 2] = self._height_box_size[env_ids] / 2.0
+        
+        axis = torch.tensor(
+            [0.0, 0.0, 1.0], dtype=self._target_pos.dtype, device=self._target_pos.device)
+        rand_rot = quat_from_angle_axis(rand_theta, axis)
+        self._target_rot[env_ids] = rand_rot
+        return
+    
     ## LLM Integrated ##
     def get_positions_for_prompt(self, env_id, env_ptr):
         """return LLM API (area_positions, agent_positions)"""
@@ -2405,16 +2410,22 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         d0 = float(dist0.item())
         d1 = float(dist1.item())
         d2 = float(dist2.item())
-        
+        near_thresh = 0.6
         # The distance between parts and franka
         if self.absorbed == 1:
             self.apply_magnetic_force(range = 2.0,mag=True)
         if self.absorbed1 == 1:
             self.apply_magnetic_force_1(range = 2.0, mag=True) 
         
+        if not (
+            (self.franka_counter == 0 and d0 < near_thresh) or 
+            (self.franka_counter == 2 and d1 < near_thresh)
+        ):
+            self.keep_cube_attached_to_box_1()
+            self.keep_cube_attached_to_box_3()
+        
         if not self.llm_mode_active:
             # 非LLM模式：执行原有的Franka逻辑
-            near_thresh = 0.6
             if self.wait_counter < self.wait_steps:
                 self.wait_counter += 1
             else:
@@ -2437,7 +2448,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
             else:
                 # LLM规划完成，执行LLM指令（P、Q技能会设置franka_counter）
-                near_thresh = 0.6
                 if self.wait_counter < self.wait_steps:
                     self.wait_counter += 1
                 else:
