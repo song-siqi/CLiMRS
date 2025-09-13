@@ -12,7 +12,7 @@ import backoff
 import traceback
 
 # from llm_test.llm_module import Agent, API_KEY_R17B, API_KEY_SIQI, API_URL, API_URL_R17B, MODEL_SELECTION
-from llm_agents.oracle_planner import OraclePlanner
+from .llm_agents.oracle_planner import OraclePlanner
 
 from types import SimpleNamespace
 
@@ -51,7 +51,8 @@ class ArenaMultiAgent(object):
         self.oracle_prompt_path = args.oracle_prompt_path
         self.agent_selection_prompt_path = args.agent_selection_prompt_path
         self.quadrotor_prompt_path = args.quadrotor_prompt_path
-        self.robot_dog_prompt_path = args.robot_dog_prompt_path
+        self.mobile_car_prompt_path = args.mobile_car_prompt_path
+        self.humanoid_prompt_path = args.humanoid_prompt_path
         self.robot_arm_prompt_path = args.robot_arm_prompt_path
 
         # Dialogue tracking
@@ -168,7 +169,7 @@ class ArenaMultiAgent(object):
     
     def write_log_to_file(self,log_message, file_name = None):
         file_name = self.record_dir
-        with open(file_name, 'a') as file:  
+        with open(file_name, 'a', encoding='utf-8') as file:  
             file.write(log_message + '\n')  
 
     def step(self):
@@ -240,9 +241,9 @@ class ArenaMultiAgent(object):
             # print(f"agents_info_text: {agents_info_text}")
             # for example (agents_info_text):
             # <quadrotor>(22) - Properties: ['MOVABLE', 'FLYABLE', 'HAVE_A_BASKET'], States: ['LAND']
-            # <robot dog>(23) - Properties: ['MOVABLE'], States: []
-            # <robot arm>(24) - Properties: ['ON_HIGH_SURFACE'], States: []
-            # <robot arm>(50) - Properties: ['ON_HIGH_SURFACE'], States: []
+            # <mobile_car>(202) - Properties: ['MOVABLE'], States: []
+            # <humanoid>(101) - Properties: ['MOVABLE'], States: []
+            # <robot_arm>(606) - Properties: ['ON_HIGH_SURFACE'], States: []
             
             # NOTE: here is the process of the agent selection
             max_retries = 3
@@ -373,16 +374,27 @@ class ArenaMultiAgent(object):
 
             # extract class_name and real_id
             class_name = message[start_class_name:end_class_name]
-            real_id = int(message[start_id:end_id])
+            try:
+                real_id = int(message[start_id:end_id])
+            except ValueError as e:
+                return False, [], [], [], 0, "None", f"Parse error: {e}", 0
+            
             id  = [key for key, value in id_name_dict.items() if value[1] == real_id]
+            if not id:
+                return False, [], [], [], 0, "None", "Agent ID not found", 0
             agent_obs = self.agent_obs2text(obs, id[0])
 
             if class_name == 'quadrotor':
                 prompt_path = self.quadrotor_prompt_path
-            elif class_name == 'robot dog' or class_name == 'robot_dog':
-                prompt_path = self.robot_dog_prompt_path
+            elif class_name == 'mobile_car':
+                prompt_path = self.mobile_car_prompt_path
+            elif class_name == 'humanoid':
+                prompt_path = self.humanoid_prompt_path
             elif class_name == 'robot arm' or class_name == 'robot_arm':
                 prompt_path = self.robot_arm_prompt_path
+            else:
+                # Default fallback to mobile_car
+                prompt_path = self.mobile_car_prompt_path
 
             chat_agent_info = {
                 "class_name": class_name, 
@@ -442,7 +454,8 @@ class ArenaMultiAgent(object):
                 raise Exception
         self.write_log_to_file(f'\nDIALOGUE_HISTORY:\n{self.dialogue_history}')  
         steps = self.env.steps
-        return done, task_results, satisfied, unsatisfied, id, agent_action, agent_message,steps
+        agent_id = id[0] if 'id' in locals() and id else 0
+        return done, task_results, satisfied, unsatisfied, agent_id, agent_action, agent_message, steps
 
 
     def run(self):

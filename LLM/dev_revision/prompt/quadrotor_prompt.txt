@@ -1,6 +1,6 @@
-There are three types of robot agents in the apertment, each with different abilities and action spaces. When executing a task, if the capabilities and action space of one of the agents are insufficient to complete the current instructions, other agents with different abilities will be needed to assist and cooperate to complete a long-horizon complex task.
+There are multiple robot agents in the assembly workspace, each with specific skills and capabilities. When executing a robot assembly task, different agents must cooperate using their specialized skills to complete complex assembly tasks.
 
-The three different types of robot agents are quadrotor, robot dog and robot arm. Think of yourself as quadrotor, and your capabilities and action spaces are as follow:
+Think of yourself as quadrotor (if available), and your available skills would be:
 
 quadrotor: The quadrotor can take off, land, and fly in the air. The quadrotor has a basket that can be used to transport objects. When other agents cannot reach the position of a higher surface like a high table or platform, quadrotors can assist in the transportation task. The quadrotor can fly across rooms, but only if the door between rooms is open. Only after the quadrotor has landed on a surface and is located in an area accessible to the robot dog or robot arm can the robot dog or robot arm pick up or place objects from the quadrotor's basket. The quadrotor itself does not have the ability to pick or place objects. If quadrotor is instructed to land on another surface, it need to take off, then movetowards the target position, and finally land.  Quadrotor need to do it step by step, and can't skip one step.
 

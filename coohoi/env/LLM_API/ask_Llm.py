@@ -3,72 +3,227 @@ import json
 import re
 import os
 from typing import Dict, Tuple
-from isaacgym import gymtorch
+
+try:
+    from isaacgym import gymtorch
+    ISAAC_GYM_AVAILABLE = True
+except ImportError:
+    ISAAC_GYM_AVAILABLE = False
+    gymtorch = None
+
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+
+try:
+    from LLM.dev_revision.llm_agents.feedback_agent import FeedbackAgent
+    from LLM.dev_revision.llm_agents.oracle_planner import OraclePlanner
+    ADVANCED_LLM_AVAILABLE = True
+    print("✅ LLM/dev_revision模块加载成功，将使用Oracle规划")
+except ImportError as e:
+    ADVANCED_LLM_AVAILABLE = False
+    print(f"❌ LLM/dev_revision模块不可用: {e}")
+    print("📌 系统将使用fallback实现")
 
 class LLMWorkflow:
     def __init__(self, area_positions: Dict[str, Tuple[float, float, float]], 
                  agent_positions: Dict[str, Tuple[float, float]], 
-                 actor_indices_map: Dict[str, int]):
+                 actor_indices_map: Dict[str, int], 
+                 use_oracle: bool = True):
         self.area_positions = area_positions
         self.agent_positions = agent_positions
         self.actor_indices_map = actor_indices_map
         self.API_URL = "http://35.220.164.252:3888/v1/chat/completions"  
         self.API_KEY = "sk-VS6OzWyx7SyeeNnWRo7BuUeD9H9jzxU88z9IQlcf4K72l14U"
+        self.use_oracle = use_oracle and ADVANCED_LLM_AVAILABLE
+        self.oracle_planner = None
+        
+        if self.use_oracle:
+            self._initialize_oracle_planner()
+    
+    def _initialize_oracle_planner(self):
+        try:
+            from types import SimpleNamespace
+            
+            args = SimpleNamespace()
+            args.debug = False
+            args.source = 'llm_module'
+            args.lm_id = 'gpt-4o-mini'
+            args.max_tokens = 1000
+            args.t = 0.7
+            args.n = 1
+            args.env = 'env0'
+            args.api_key = None
+            args.organization = None
+            args.oracle_prompt_path = 'LLM/dev_revision/prompt/oracle_prompt.txt'
+            args.agent_selection_prompt_path = 'LLM/dev_revision/prompt/agent_selection_prompt.txt'
+            
+            def env_fn():
+                return None
+                
+            def agent_fn():
+                return []
+            
+            self.oracle_planner = OraclePlanner(
+                environment_fn=env_fn,
+                agent_fn=[],  # 修复：传递空列表而不是函数
+                args=args,
+                run_predefined_actions=False,
+                oracle_prompt_path=args.oracle_prompt_path,
+                agent_selection_prompt_path=args.agent_selection_prompt_path,
+            )
+        except Exception as e:
+            print(f"Failed to initialize oracle planner: {e}")
+            self.use_oracle = False
         
     def ask_llm(self, question):
+        if self.use_oracle and self.oracle_planner:
+            return self._ask_oracle_llm(question)
+        else:
+            return self._ask_fallback_llm(question)
+
+    def _ask_oracle_llm(self, question):
+        try:
+            obs_text = self._format_oracle_observation_to_text()
+            
+            print(f"🔮 使用Oracle规划系统，观察文本: {obs_text[:200]}...")
+            
+            vanilla_message, usage = self.oracle_planner.oracle_planning_vanilla(
+                obs_text=obs_text,
+                goal_instruction=question,
+                num_agents=5,
+                dialogue_history="",
+            )
+            
+            print(f"🔮 Oracle原始响应: {vanilla_message}")
+            
+            message, usage = self.oracle_planner.extract_structured_message(vanilla_message)
+            
+            print(f"🔮 Oracle结构化响应: {message}")
+            return message
+            
+        except Exception as e:
+            print(f"❌ Oracle LLM失败，降级到fallback: {e}")
+            import traceback
+            traceback.print_exc()
+            return self._ask_fallback_llm(question)
+
+    def _format_observation_to_text(self):
+        obs_text = ""
+        
+        if self.area_positions:
+            obs_text += "Areas and Components:\n"
+            for area, pos in self.area_positions.items():
+                obs_text += f"Area {area}: Component at position ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})\n"
+        
+        if self.agent_positions:
+            obs_text += "\nAgent Positions:\n"
+            for agent, pos in self.agent_positions.items():
+                obs_text += f"{agent}: Position ({pos[0]:.2f}, {pos[1]:.2f})\n"
+        
+        obs_text += "\nCurrent Task: Assembly of robot components with humanoid, mobile robots, and franka arm coordination.\n"
+        
+        return obs_text
+
+    def _format_oracle_observation_to_text(self):
+        obs_text = ""
+        
+        # 按照dev_revision/arena.py中agent_obs2text的格式
+        if self.agent_positions:
+            for agent_name, pos in self.agent_positions.items():
+                if "humanoid" in agent_name.lower():
+                    obs_text += f"I am <humanoid>(101). Now my state is: STANDING. I am INSIDE the <assembly room>(1).\n"
+                elif "franka" in agent_name.lower():
+                    obs_text += f"I am <franka>(606). Now my state is: READY. I am ON the <high table>(2).\n"
+                elif "mobile_car" in agent_name.lower() or "wheeled robot" in agent_name.lower():
+                    obs_text += f"I am <mobile_car>(202). Now my state is: IDLE. I am INSIDE the <assembly room>(1).\n"
+        
+        obs_text += "\nNow I am in the <assembly room>(1). In this room, I can see:\n"
+        
+        if self.area_positions:
+            for area, pos in self.area_positions.items():
+                if area == 'A':
+                    obs_text += f"<trunk>(303). Its properties are: ASSEMBLABLE. Now its state is: ON_SURFACE.\n"
+                elif area == 'B':
+                    obs_text += f"<left wheel>(405). Its properties are: GRABABLE. Now its state is: ON_SURFACE.\n"
+                elif area == 'C':
+                    obs_text += f"<right wheel>(406). Its properties are: GRABABLE. Now its state is: ON_SURFACE.\n"
+                elif area == 'D':
+                    obs_text += f"<obstacles>(507). Its properties are: CARRIABLE. Now its state is: ON_SURFACE.\n"
+        
+        
+        obs_text += "\nThese objects have a certain position relationship with each other:\n"
+        if self.area_positions:
+            for area, pos in self.area_positions.items():
+                if area == 'A':
+                    obs_text += f"The <trunk>(303) is ON the <surface_A>(200).\n"
+                elif area == 'B':
+                    obs_text += f"The <left wheel>(405) is ON the <surface_B>(201).\n"
+                elif area == 'C':
+                    obs_text += f"The <right wheel>(406) is ON the <surface_C>(202).\n"
+                elif area == 'D':
+                    obs_text += f"The <obstacles>(507) is ON the <surface_D>(203).\n"
+        
+        obs_text += "The franka assembly area is at the <assembly table>(2).\n"
+        
+        return obs_text
+
+    def _ask_fallback_llm(self, question):
         headers = {
             'Accept': 'application/json',
             'Authorization': f'Bearer {self.API_KEY}',
             'User-Agent':'Apifox/1.0.0(https://apifox.com)',
             'Content-Type': 'application/json'
         }
-        # instruction head + goal description + state description + action list
+        # 使用与Oracle prompt对齐的格式
         prompt = """{}
-                           You are an expert in robotics, now we urgently need to use wheeled robots, 
-                           humanoid robots and mechanical arm (franka) to jointly complete a small robot assembly task. 
-                           Please help me design the fastest workflow to complete this task based on the skills provided by the following robots, and every step you should give the Skill list number, like A., S.. 
-                           Please note that all skills and objects are represented by <name> (id), for example, <humanoid> (101).
-                           Goal Description: Locate all the parts that need to be assembled (a total of 3), including 1 <trunk> (303) and 2 wheels <left wheel> (405), <right wheel> (406), 
-                           and move the parts to the side of the <franka> (606) to achieve sequential assembly.
-                           
-                           WORKFLOW LOGIC:
-                           1. First: Use A/B/C/D skills to explore different areas and find components
-                           2. Second: Use E/F/G skills to move robots to franka area for component delivery
-                           3. Third: Use J/K/L skills to push components to franka for assembly
-                    State Description:
-                    component list: <trunk> (303), <left wheel> (405), <right wheel> (406), <obstacles> (507).
-                    agent list: <wheeled robot1> (202),<wheeled robot2> (203),<wheeled robot3> (204), <humanoid> (101), <franka> (606).
-                    franka position: <franka> (606) is fixed in (0.0, -2.0).
+                    Suppose you think of yourself as a robotics assembly helper named Oracle. There are different types of robot agents in the workspace, each with different abilities and action spaces. When executing a task, if the capabilities and action space of one of the agents are insufficient to complete the current instructions, other agents with different abilities will be needed to assist and cooperate to complete a robot assembly task.
+
+                    The robot agents and their available skills are:
+
+                    Humanoid (101): Available skills:
+                    - [walk] <humanoid> (101) move to selected area
+                    - [carry] <humanoid> (101) carry <obstacles> (507)
+                    - [wait] <humanoid> (101) wait
+
+                    Mobile Car (202): Available skills:
+                    - [move] <mobile_car> (202) move to component location using RRT path
+                    - [push] <mobile_car> (202) push selected component to franka area
+                    - [wait] <mobile_car> (202) wait
+
+                    Franka Robot Arm (606): Available skills:
+                    - [check] <franka> (606) check <trunk> (303)
+                    - [check] <franka> (606) check <left wheel> (405)
+                    - [check] <franka> (606) check <right wheel> (406)
+                    - [pick] <franka> (606) pick and place <left wheel> (405) on <trunk> (303)
+                    - [pick] <franka> (606) pick and place <right wheel> (406) on <trunk> (303)
+                    - [wait] <franka> (606) wait
+
+                    Observation System: Available skills:
+                    - [observe] area <A> (001) - only observe, robot doesn't move
+                    - [observe] area <B> (002) - only observe, robot doesn't move
+                    - [observe] area <C> (003) - only observe, robot doesn't move
+                    - [observe] area <D> (004) - only observe, robot doesn't move
+
+                    The goal of the task is: {}
+
                     Current Environment Observation:
                     {}
-                    Skill list:
-                    A. [observe] area <A> (001) - only observe, robot doesn't move
-                    B. [observe] area <B> (002) - only observe, robot doesn't move  
-                    C. [observe] area <C> (003) - only observe, robot doesn't move
-                    D. [observe] area <D> (004) - only observe, robot doesn't move
-                    E. [move] <wheeled robot1> (202) move to component location using RRT path
-                    F. [move] <wheeled robot2> (203) move to component location using RRT path
-                    G. [move] <wheeled robot3> (204) move to component location using RRT path
-                    H. [walk] <humanoid> (101) move to selected area
-                    I. [carry] <humanoid> (101) carry <obstacles> (507)
-                    J. [push] <wheeled robot1> (202) push selected component to franka area
-                    K. [push] <wheeled robot2> (203) push selected component to franka area
-                    L. [push] <wheeled robot3> (204) push selected component to franka area
-                    M. [check] <franka> (606) check <trunk> (303)
-                    N. [check] <franka> (606) check <left wheel> (405)
-                    O. [check] <franka> (606) check <right wheel> (406)
-                    P. [pick] <franka> (606) pick and place <left wheel> (405) on <trunk> (303)
-                    Q. [pick] <franka> (606) pick and place <right wheel> (406) on <trunk> (303)
-                    R. [wait] <franka> (606) wait
-                    S. [wait] <humanoid> (101) wait
-                    T. [wait] <wheeled robot1> (202) wait
-                    U. [wait] <wheeled robot2> (203) wait
-                    V. [wait] <wheeled robot3> (204) wait
+
+                    Assembly Task Workflow:
+                    1. Use [observe] skills to locate components in areas A, B, C, D
+                    2. Use wheeled robots to [move] to component locations and [push] components to franka area
+                    3. Use humanoid to [carry] obstacles (507) if path clearing is needed
+                    4. Use franka to [check] components and [pick] and place wheels on trunk for final assembly
+                    5. Coordinate between all agents using [wait] skills when needed
+
+                    Please provide the most critical next action using the specific skill format. The output should be in the format: "Hello <robot_type>(id): [skill_name] instruction."
+
                     Answer: Let's think step by step.
                 """
 
         formatted_question = self.build_prompt_with_positions(question)
-        prompt_filled = prompt.format(question, formatted_question)
+        prompt_filled = prompt.format(question, question, formatted_question)
         prompt_filled = self.replace_placeholders_with_positions(prompt_filled)
         
 
@@ -151,7 +306,7 @@ class LLMWorkflow:
         return areas
 
     def get_agent_positions_from_task(self, env_id: int = 0) -> Dict[str, Tuple[float, float]]:
-        if gymtorch is None:
+        if not ISAAC_GYM_AVAILABLE or gymtorch is None:
             raise RuntimeError("isaacgym.gymtorch 未找到，请在有 Isaac Gym 环境下运行此函数")
         root_state = self.task.gym.acquire_actor_root_state_tensor(self.task.sim)
         root_state = gymtorch.wrap_tensor(root_state)

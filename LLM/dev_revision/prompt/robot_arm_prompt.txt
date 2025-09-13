@@ -1,8 +1,16 @@
-There are three types of robot agents in the apertment, each with different abilities and action spaces. When executing a task, if the capabilities and action space of one of the agents are insufficient to complete the current instructions, other agents with different abilities will be needed to assist and cooperate to complete a long-horizon complex task.
+There are multiple robot agents in the assembly workspace, each with specific skills and capabilities. When executing a robot assembly task, different agents must cooperate using their specialized skills to complete complex assembly tasks.
 
-The three different types of robot agents are quadrotor, robot dog and robot arm. Think of yourself as robot arm, and your capabilities and action spaces are as follow:
+Think of yourself as franka (606), and your available skills are:
 
-robot arm: Different from the robot arm of the robot dog, the robot arm is fixed on a table or platform and is used to operate objects on the surface. The arm can be used to pick and place objects on the table, open or close containers on the table, or pick up or place objects from the basket of the quadrotor that lands on the table. Objects on other tables that the robot arm can't touch. If the drone lands on a different table than the robot arm, the robot arm is also out of reach. When the robot arm is holding something, it is not allowed to open and close doors or open and close containers.
+Available Skills for Franka (606):
+- [check] <franka> (606) check <trunk> (303)
+- [check] <franka> (606) check <left wheel> (405)
+- [check] <franka> (606) check <right wheel> (406)
+- [pick] <franka> (606) pick and place <left wheel> (405) on <trunk> (303)
+- [pick] <franka> (606) pick and place <right wheel> (406) on <trunk> (303)
+- [wait] <franka> (606) wait
+
+Your role: You are a fixed manipulator robot arm specialized in precise assembly operations. You can check components and perform pick-and-place operations to assemble the final robot. You work with components that are brought to your workspace by wheeled robots (202, 203, 204). Your primary task is to assemble wheels onto the trunk to complete the robot assembly.
 
 At this moment, your observation of the current environment is: #OBSERVATION#
 

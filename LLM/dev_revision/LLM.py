@@ -143,32 +143,32 @@ class LLM:
 		print("WARNING! No available action parsed!!! Output plan NONE!\n")
 		return None
 
-	def get_available_plans(self, agent_node, next_rooms, all_landable_surfaces, landable_surfaces, on_surfaces, 
+	def _get_available_plans_with_params(self, agent_node, next_rooms, all_landable_surfaces, landable_surfaces, on_surfaces, 
 						 grabbed_objects, reached_objects, unreached_objecs, on_same_surface_objects
 						 ):
 		"""
-		'quadrotor':
-		[land_on] <surface>
-		[movetowards] <surface>/<next_room>
-		[takeoff_from] <surface>
+		New skill-based action format:
+		
+		'humanoid':
+		[walk] <humanoid> (101) move to selected area
+		[carry] <humanoid> (101) carry <obstacles> (507)
+		[wait] <humanoid> (101) wait
 
-		'robot dog':
-		[open] <container>/<door>
-		[close] <container>/<door>
-		[grab] <object>
-		[putinto] <object> into <container>
-		[puton] <object> on <surface>
-		[movetowards] <object>
+		'wheeled robot':
+		[move] <wheeled robot1/2/3> (202/203/204) move to component location using RRT path
+		[push] <wheeled robot1/2/3> (202/203/204) push selected component to franka area
+		[wait] <wheeled robot1/2/3> (202/203/204) wait
 
-		'robot arm':
-		[open] <container>
-		[close] <container>
-		[grab] <object>
-		[putinto] <object> into <container>
-		[puton] <object> on <surface>
+		'franka':
+		[check] <franka> (606) check <trunk/left wheel/right wheel> (303/405/406)
+		[pick] <franka> (606) pick and place <wheel> on <trunk>
+		[wait] <franka> (606) wait
 
+		'observation':
+		[observe] area <A/B/C/D> (001-004) - only observe, robot doesn't move
 		"""
 		available_plans = []
+		
 		if agent_node["class_name"] == "quadrotor":
 			other_landable_surfaces = []
 			if "FLYING" in agent_node["states"]:
@@ -187,53 +187,76 @@ class LLM:
 				if on_surfaces is not None:
 					available_plans.append(f"[takeoff_from] <{on_surfaces['class_name']}>({on_surfaces['id']})")
 
-		if agent_node["class_name"] == "robot dog" or agent_node["class_name"] == "robot_dog":
-			# if grabbed_objects is not None:
-			# 	available_plans.append(f"[puton] <{grabbed_objects['class_name']}>({grabbed_objects['id']}) on <{on_surfaces['class_name']}>({on_surfaces['id']})")
-			# The robotic dog is not allowed to put things on the floor. If it needs to open the door and has something in its hand, it needs to find a low surface to put things first
-			if len(reached_objects) != 0:
-				for reached_object in reached_objects:
-					if grabbed_objects is None:
-						if 'CONTAINERS' in reached_object['properties'] and 'CLOSED' in reached_object['states'] or \
-							reached_object['class_name'] == 'door' and 'CLOSED' in reached_object['states']:
-							available_plans.append(f"[open] <{reached_object['class_name']}>({reached_object['id']})")
-						if 'CONTAINERS' in reached_object['properties'] and 'OPEN' in reached_object['states'] or \
-							reached_object['class_name'] == 'door' and 'OPEN' in reached_object['states']:
-							available_plans.append(f"[close] <{reached_object['class_name']}>({reached_object['id']})")
-						if 'GRABABLE' in reached_object['properties']:
-							available_plans.append(f"[grab] <{reached_object['class_name']}>({reached_object['id']})")
-					if grabbed_objects is not None:
-						if 'CONTAINERS' in reached_object['properties'] and ('OPEN' in reached_object['states'] or "OPEN_FOREVER" in reached_object['states']):
-							available_plans.append(f"[putinto] <{grabbed_objects['class_name']}>({grabbed_objects['id']}) into <{reached_object['class_name']}>({reached_object['id']})")
-						if 'SURFACES' in reached_object['properties']:
-							available_plans.append(f"[puton] <{grabbed_objects['class_name']}>({grabbed_objects['id']}) on <{reached_object['class_name']}>({reached_object['id']})")
+		elif agent_node["class_name"] == "humanoid":
+			# New skill-based format for humanoid
+			# Add walk skill to different areas
+			for next_room in next_rooms:
+				if 'OPEN' in next_room[1]['states'] or "OPEN_FOREVER" in next_room[1]['states']:
+					available_plans.append(f"[walk] <humanoid> (101) move to selected area")
 			
+			# Add carry skill for obstacles
 			if len(unreached_objecs) != 0:
 				for unreached_object in unreached_objecs:
-					available_plans.append(f"[movetowards] <{unreached_object['class_name']}>({unreached_object['id']})")
-			for next_room in next_rooms:
-					if 'OPEN' in next_room[1]['states'] or "OPEN_FOREVER" in next_room[1]['states']:
-						available_plans.append(f"[movetowards] <{next_room[0]['class_name']}>({next_room[0]['id']})")
+					if unreached_object['class_name'] == 'obstacles':
+						available_plans.append(f"[carry] <humanoid> (101) carry <obstacles> (507)")
+			
+			# Always add wait skill
+			available_plans.append(f"[wait] <humanoid> (101) wait")
 
+		elif agent_node["class_name"] in ["robot dog", "robot_dog", "mobile_car", "wheeled robot", "wheeled robot1", "wheeled robot2", "wheeled robot3"]:
+			# New skill-based format for wheeled robots
+			agent_id = str(agent_node.get('id', 202))  # Default to 202 if no ID, ensure string
+			robot_name = "mobile_car"
+			robot_id = "202"
+			
+			# Add move skills to component locations
+			if len(unreached_objecs) != 0:
+				for unreached_object in unreached_objecs:
+					if unreached_object['class_name'] in ['trunk', 'left wheel', 'right wheel']:
+						available_plans.append(f"[move] <{robot_name}> ({robot_id}) move to component location using RRT path")
+			
+			# Add push skills for components
+			if len(reached_objects) != 0:
+				for reached_object in reached_objects:
+					if reached_object['class_name'] in ['trunk', 'left wheel', 'right wheel']:
+						available_plans.append(f"[push] <{robot_name}> ({robot_id}) push selected component to franka area")
+			
+			# Always add wait skill
+			available_plans.append(f"[wait] <{robot_name}> ({robot_id}) wait")
 
-		if agent_node['class_name'] == 'robot arm' or agent_node['class_name'] == 'robot_arm':
-			if grabbed_objects is not None:
-				available_plans.append(f"[puton] <{grabbed_objects['class_name']}>({grabbed_objects['id']}) on <{on_surfaces['class_name']}>({on_surfaces['id']})")
+		elif agent_node['class_name'] in ['robot arm', 'robot_arm', 'franka']:
+			# New skill-based format for franka robot arm
+			
+			# Add check skills for components
 			for on_same_surface_object in on_same_surface_objects:
-				if grabbed_objects is None:
-					if 'CONTAINERS' in on_same_surface_object['properties'] and 'OPEN' in on_same_surface_object['states']:
-						available_plans.append(f"[close] <{on_same_surface_object['class_name']}>({on_same_surface_object['id']})")
-					if 'CONTAINERS' in on_same_surface_object['properties'] and 'CLOSED' in on_same_surface_object['states']:
-						available_plans.append(f"[open] <{on_same_surface_object['class_name']}>({on_same_surface_object['id']})")
-					if 'GRABABLE' in on_same_surface_object['properties']:
-						available_plans.append(f"[grab] <{on_same_surface_object['class_name']}>({on_same_surface_object['id']})")
+				if on_same_surface_object['class_name'] == 'trunk':
+					available_plans.append(f"[check] <franka> (606) check <trunk> (303)")
+				elif on_same_surface_object['class_name'] == 'left wheel':
+					available_plans.append(f"[check] <franka> (606) check <left wheel> (405)")
+				elif on_same_surface_object['class_name'] == 'right wheel':
+					available_plans.append(f"[check] <franka> (606) check <right wheel> (406)")
+			
+			# Add pick and place skills if components are available
+			trunk_available = any(obj['class_name'] == 'trunk' for obj in on_same_surface_objects)
+			left_wheel_available = any(obj['class_name'] == 'left wheel' for obj in on_same_surface_objects)
+			right_wheel_available = any(obj['class_name'] == 'right wheel' for obj in on_same_surface_objects)
+			
+			if trunk_available and left_wheel_available:
+				available_plans.append(f"[pick] <franka> (606) pick and place <left wheel> (405) on <trunk> (303)")
+			if trunk_available and right_wheel_available:
+				available_plans.append(f"[pick] <franka> (606) pick and place <right wheel> (406) on <trunk> (303)")
+			
+			# Always add wait skill
+			available_plans.append(f"[wait] <franka> (606) wait")
 
-				if grabbed_objects is not None:
-					
-					if 'CONTAINERS' in on_same_surface_object['properties'] and ('OPEN' in on_same_surface_object['states'] or "OPEN_FOREVER" in on_same_surface_object['states']):
-						available_plans.append(f"[putinto] <{grabbed_objects['class_name']}>({grabbed_objects['id']}) into <{on_same_surface_object['class_name']}>({on_same_surface_object['id']})")
-					if 'SURFACES' in on_same_surface_object['properties']:
-						available_plans.append(f"[puton] <{grabbed_objects['class_name']}>({grabbed_objects['id']}) on <{on_same_surface_object['class_name']}>({on_same_surface_object['id']})")
+		# Add observation skills for all agents (environmental awareness)
+		if not available_plans or len(available_plans) == 1:  # If only wait skill or no skills
+			available_plans.extend([
+				"[observe] area <A> (001) - only observe, robot doesn't move",
+				"[observe] area <B> (002) - only observe, robot doesn't move", 
+				"[observe] area <C> (003) - only observe, robot doesn't move",
+				"[observe] area <D> (004) - only observe, robot doesn't move"
+			])
 
 		plans = ""
 		for i, plan in enumerate(available_plans):
@@ -256,7 +279,7 @@ class LLM:
 		with open(prompt_path, 'r') as f:
 			agent_prompt = f.read()
 
-		available_plans, num, available_plans_list = self.get_available_plans(agent_node, next_rooms, all_landable_surfaces,landable_surfaces, on_surfaces, grabbed_objects, reached_objects,unreached_objecs, on_same_surface_objects,
+		available_plans, num, available_plans_list = self._get_available_plans_with_params(agent_node, next_rooms, all_landable_surfaces,landable_surfaces, on_surfaces, grabbed_objects, reached_objects,unreached_objecs, on_same_surface_objects,
 																		 )
 		
 		agent_prompt = agent_prompt.replace('#OBSERVATION#', chat_agent_info['observation'])

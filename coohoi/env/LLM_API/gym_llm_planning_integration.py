@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from enum import Enum
 import numpy as np
 from isaacgym import gymapi, gymtorch
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+
 from LLM.dev_revision.llm_agents.feedback_agent import FeedbackAgent
+from LLM.dev_revision.llm_agents.oracle_planner import OraclePlanner
 from LLM.dev_revision.arena import ArenaMultiAgent
 from .gym_llm_integration import GymLLMIntegration
 from .ask_Llm import LLMWorkflow
@@ -52,6 +57,7 @@ class GymLLMPlanningIntegration:
         self.config_path = config_path
         
         self.llm_arena = None
+        self.oracle_planner = None
         self.llm_agents = {}
         self.planning_thread = None
         self.planning_active = False
@@ -108,7 +114,7 @@ class GymLLMPlanningIntegration:
             return
         
         try:
-            if os.path.exists(self.config_path):
+            if self.config_path and os.path.exists(self.config_path):
                 with open(self.config_path, 'r') as f:
                     raw = json.load(f)
                 if isinstance(raw, list) and raw:
@@ -117,12 +123,13 @@ class GymLLMPlanningIntegration:
                     env_config = raw
                 else:
                     env_config = {}
-                
-                self._create_llm_agents(env_config)
-                self._create_planning_arena(env_config)
-                print("LLM planning system initialized successfully")
             else:
-                print(f"Config file not found: {self.config_path}")
+                env_config = {}
+                
+            self._create_llm_agents(env_config)
+            self._create_planning_arena(env_config)
+            self._create_oracle_planner(env_config)
+            print("LLM planning system initialized successfully")
                 
         except Exception as e:
             print(f"Failed to initialize LLM system: {e}")
@@ -152,13 +159,23 @@ class GymLLMPlanningIntegration:
     
     def _create_mock_args(self):
         class MockArgs:
-            def __init__(self, task):
-                self.task = task.cfg.get('task', 'HumanoidAMPCarryObjectObstacle')
-                self.num_envs = task.cfg.get('num_envs', 1)
-                self.cfg_env = task.cfg.get('cfg_env', 'coohoi/data/cfg/humanoid_carrybox.yaml')
-                self.cfg_train = task.cfg.get('cfg_train', 'coohoi/data/cfg/train/amp_humanoid_task.yaml')
-                self.motion_file = task.cfg.get('motion_file', 'coohoi/data/motions/coohoi_data/coohoi_data.yaml')
-                self.checkpoint = task.cfg.get('checkpoint', 'coohoi/data/models/Humanoid.pth')
+            def __init__(self, task_instance):
+                if hasattr(task_instance, 'cfg'):
+                    self.task = task_instance.cfg.get('task', 'HumanoidAMPCarryObjectObstacle')
+                    self.num_envs = task_instance.cfg.get('num_envs', 1)
+                    self.cfg_env = task_instance.cfg.get('cfg_env', 'coohoi/data/cfg/humanoid_carrybox.yaml')
+                    self.cfg_train = task_instance.cfg.get('cfg_train', 'coohoi/data/cfg/train/amp_humanoid_task.yaml')
+                    self.motion_file = task_instance.cfg.get('motion_file', 'coohoi/data/motions/coohoi_data/coohoi_data.yaml')
+                    self.checkpoint = task_instance.cfg.get('checkpoint', 'coohoi/data/models/Humanoid.pth')
+                    self.env = task_instance.cfg.get('env', 'env0')
+                else:
+                    self.task = 'HumanoidAMPCarryObjectObstacle'
+                    self.num_envs = 1
+                    self.cfg_env = 'coohoi/data/cfg/humanoid_carrybox.yaml'
+                    self.cfg_train = 'coohoi/data/cfg/train/amp_humanoid_task.yaml'
+                    self.motion_file = 'coohoi/data/motions/coohoi_data/coohoi_data.yaml'
+                    self.checkpoint = 'coohoi/data/models/Humanoid.pth'
+                    self.env = 'env0'
                 
                 self.debug = False
                 self.source = 'llm_module'
@@ -166,17 +183,17 @@ class GymLLMPlanningIntegration:
                 self.max_tokens = 1000
                 self.t = 0.7
                 self.n = 1
-                self.env = task.cfg.get('env', 'env0')
                 self.api_key = None
                 self.organization = None
-                self.oracle_prompt_path = None
-                self.agent_selection_prompt_path = None
-                self.quadrotor_prompt_path = None
-                self.robot_dog_prompt_path = None
-                self.robot_arm_prompt_path = None
-                self.judge_prompt_path = None
+                self.oracle_prompt_path = 'LLM/dev_revision/prompt/oracle_prompt.txt'
+                self.agent_selection_prompt_path = 'LLM/dev_revision/prompt/agent_selection_prompt.txt'
+                self.quadrotor_prompt_path = 'LLM/dev_revision/prompt/quadrotor_prompt.txt'
+                self.robot_dog_prompt_path = 'LLM/dev_revision/prompt/robot_dog_prompt.txt'
+                self.robot_arm_prompt_path = 'LLM/dev_revision/prompt/robot_arm_prompt.txt'
+                self.judge_prompt_path = 'LLM/dev_revision/prompt/judge_prompt.txt'
+                self.select_agents = False
         
-        return MockArgs()
+        return MockArgs(self.task)
     
     def _create_planning_arena(self, env_config):
         try:
@@ -194,6 +211,28 @@ class GymLLMPlanningIntegration:
             
         except Exception as e:
             print(f"Failed to create planning arena: {e}")
+    
+    def _create_oracle_planner(self, env_config):
+        try:
+            def env_fn():
+                return self._create_mock_env_info(env_config)
+
+            def agent_fn(args_llm):
+                return FeedbackAgent(**args_llm)
+
+            args = self._create_mock_args()
+            
+            self.oracle_planner = OraclePlanner(
+                environment_fn=env_fn,
+                agent_fn=list(self.llm_agents.values()),
+                args=args,
+                run_predefined_actions=False,
+                oracle_prompt_path=args.oracle_prompt_path,
+                agent_selection_prompt_path=args.agent_selection_prompt_path,
+            )
+            print("Oracle planner initialized successfully")
+        except Exception as e:
+            print(f"Failed to create oracle planner: {e}")
     
     def _create_mock_env_info(self, env_config):
         class MockEnvInfo:
@@ -258,29 +297,15 @@ class GymLLMPlanningIntegration:
     
     def _run_planning(self, task_description: str):
         try:
-            area_positions, agent_positions = {}, {}
-            try:
-                from .gym_llm_integration import GymEnvironmentObserver
-                observer = GymEnvironmentObserver(self.task)
-                env_state = observer.get_environment_state()
-                area_positions = env_state.get('area_positions', {})
-                agent_positions = env_state.get('agent_positions', {})
-            except Exception as e:
-                print(f"Failed to get environment state: {e}")
-
-            decision_text = None
-            try:
-                workflow = LLMWorkflow(area_positions, agent_positions, {})
-                decision_text = workflow.ask_llm(task_description)
-                print(f"📝 LLM原始响应长度: {len(decision_text) if decision_text else 0}")
-                if decision_text:
-                    print(f"📝 LLM原始响应内容:\n{decision_text[:500]}...")
-            except Exception as e:
-                print(f"❌ LLM调用失败: {e}")
+            if self.oracle_planner:
+                decision_text = self._use_oracle_planning(task_description)
+            else:
+                decision_text = self._use_fallback_planning(task_description)
 
             plan_steps: List[Dict[str, Any]] = []
             if isinstance(decision_text, str) and len(decision_text) > 0:
                 try:
+                    area_positions, agent_positions = self._get_environment_state()
                     plan_steps = parse_workflow_text(decision_text, area_positions)
                     print(f"✅ LLM规划解析成功: {len(plan_steps)} 个步骤")
                     for i, step in enumerate(plan_steps):
@@ -306,6 +331,71 @@ class GymLLMPlanningIntegration:
             self.plan_status = "idle"
         finally:
             self.planning_active = False
+
+    def _use_oracle_planning(self, task_description: str) -> str:
+        try:
+            area_positions, agent_positions = self._get_environment_state()
+            obs_text = self._format_gym_observation_to_text(area_positions, agent_positions)
+            
+            vanilla_message, usage = self.oracle_planner.oracle_planning_vanilla(
+                obs_text=obs_text,
+                goal_instruction=task_description,
+                num_agents=len(self.llm_agents),
+                dialogue_history="",
+            )
+            
+            print(f"📝 Oracle规划原始响应: {vanilla_message}")
+            
+            message, usage = self.oracle_planner.extract_structured_message(vanilla_message)
+            print(f"📝 Oracle结构化消息: {message}")
+            
+            return message
+            
+        except Exception as e:
+            print(f"❌ Oracle规划失败: {e}")
+            return self._use_fallback_planning(task_description)
+
+    def _use_fallback_planning(self, task_description: str) -> str:
+        try:
+            area_positions, agent_positions = self._get_environment_state()
+            workflow = LLMWorkflow(area_positions, agent_positions, {}, use_oracle=True)
+            decision_text = workflow.ask_llm(task_description)
+            print(f"📝 LLM原始响应长度: {len(decision_text) if decision_text else 0}")
+            if decision_text:
+                print(f"📝 LLM原始响应内容:\n{decision_text[:500]}...")
+            return decision_text
+        except Exception as e:
+            print(f"❌ LLM调用失败: {e}")
+            return ""
+
+    def _get_environment_state(self) -> Tuple[Dict, Dict]:
+        try:
+            from .gym_llm_integration import GymEnvironmentObserver
+            observer = GymEnvironmentObserver(self.task)
+            env_state = observer.get_environment_state()
+            area_positions = env_state.get('area_positions', {})
+            agent_positions = env_state.get('agent_positions', {})
+            return area_positions, agent_positions
+        except Exception as e:
+            print(f"Failed to get environment state: {e}")
+            return {}, {}
+
+    def _format_gym_observation_to_text(self, area_positions: Dict, agent_positions: Dict) -> str:
+        obs_text = ""
+        
+        if area_positions:
+            obs_text += "Areas and Components:\n"
+            for area, pos in area_positions.items():
+                obs_text += f"Area {area}: Component at position ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})\n"
+        
+        if agent_positions:
+            obs_text += "\nAgent Positions:\n"
+            for agent, pos in agent_positions.items():
+                obs_text += f"{agent}: Position ({pos[0]:.2f}, {pos[1]:.2f})\n"
+        
+        obs_text += "\nCurrent Task: Assembly of robot components with humanoid, mobile robots, and franka arm coordination.\n"
+        
+        return obs_text
 
     def update_agent_states(self):
         try:
