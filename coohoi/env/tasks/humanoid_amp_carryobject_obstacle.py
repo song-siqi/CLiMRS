@@ -121,6 +121,7 @@ class LLMManager:
                     self.task_name = "robot_assembly"
                     self.ground_truth_step_num = 10
                     self.num_agent = 5  # humanoid + franka + 3 mobile_cars
+                    self.agent_states = {}  # 跟踪每个agent的状态
                     self.id_name_dict = {
                         0: ('humanoid', 101), 
                         1: ('franka', 606), 
@@ -142,13 +143,11 @@ class LLMManager:
                             "<mobile_car_2> (202)": (-1.0, 1.0),
                             "<mobile_car_3> (203)": (0.0, -1.0)
                         }
-                    
-                    # 检查执行状态
+
                     executed_actions = getattr(self, 'executed_actions', {})
                     
                     obs = []
-                    for i in range(5):  # 修复：应该是5个agent
-                        # 为每个agent提供对应的动作列表
+                    for i in range(5): 
                         if i == 0:  # humanoid agent
                             available_actions = [
                                 "[walk] <humanoid> (101) move to selected area",
@@ -166,61 +165,37 @@ class LLMManager:
                             ]
                         elif i == 2:  # mobile_car_1 agent (left wheel)
                             agent_key = "mobile_car_1(201)"
-                            agent_actions = executed_actions.get(agent_key, [])
-                            move_executed = any("[move]" in action for action in agent_actions)
-                            push_executed = any("[push]" in action for action in agent_actions)
+                            agent_state = self.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
                             
                             available_actions = []
-                            if not move_executed:
+                            if agent_state['status'] == 'idle':
                                 available_actions.append("[move] <mobile_car_1> (201) move to component location using RRT path")
-                            elif not push_executed:
+                            elif agent_state['status'] == 'moved':
                                 available_actions.append("[push] <mobile_car_1> (201) push selected component to franka area")
                             
-                            available_actions.extend([
-                                "[wait] <mobile_car_1> (201) wait",
-                                "[observe] area <A> (001) - only observe, robot doesn't move",
-                                "[observe] area <B> (002) - only observe, robot doesn't move",
-                                "[observe] area <C> (003) - only observe, robot doesn't move",
-                                "[observe] area <D> (004) - only observe, robot doesn't move"
-                            ])
+                            available_actions.append("[wait] <mobile_car_1> (201) wait")
                         elif i == 3:  # mobile_car_2 agent (right wheel)
                             agent_key = "mobile_car_2(202)"
-                            agent_actions = executed_actions.get(agent_key, [])
-                            move_executed = any("[move]" in action for action in agent_actions)
-                            push_executed = any("[push]" in action for action in agent_actions)
+                            agent_state = self.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
                             
                             available_actions = []
-                            if not move_executed:
+                            if agent_state['status'] == 'idle':
                                 available_actions.append("[move] <mobile_car_2> (202) move to component location using RRT path")
-                            elif not push_executed:
+                            elif agent_state['status'] == 'moved':
                                 available_actions.append("[push] <mobile_car_2> (202) push selected component to franka area")
                             
-                            available_actions.extend([
-                                "[wait] <mobile_car_2> (202) wait",
-                                "[observe] area <A> (001) - only observe, robot doesn't move",
-                                "[observe] area <B> (002) - only observe, robot doesn't move",
-                                "[observe] area <C> (003) - only observe, robot doesn't move",
-                                "[observe] area <D> (004) - only observe, robot doesn't move"
-                            ])
+                            available_actions.append("[wait] <mobile_car_2> (202) wait")
                         elif i == 4:  # mobile_car_3 agent (trunk)
                             agent_key = "mobile_car_3(203)"
-                            agent_actions = executed_actions.get(agent_key, [])
-                            move_executed = any("[move]" in action for action in agent_actions)
-                            push_executed = any("[push]" in action for action in agent_actions)
+                            agent_state = self.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
                             
                             available_actions = []
-                            if not move_executed:
+                            if agent_state['status'] == 'idle':
                                 available_actions.append("[move] <mobile_car_3> (203) move to component location using RRT path")
-                            elif not push_executed:
+                            elif agent_state['status'] == 'moved':
                                 available_actions.append("[push] <mobile_car_3> (203) push selected component to franka area")
                             
-                            available_actions.extend([
-                                "[wait] <mobile_car_3> (203) wait",
-                                "[observe] area <A> (001) - only observe, robot doesn't move",
-                                "[observe] area <B> (002) - only observe, robot doesn't move",
-                                "[observe] area <C> (003) - only observe, robot doesn't move",
-                                "[observe] area <D> (004) - only observe, robot doesn't move"
-                            ])
+                            available_actions.append("[wait] <mobile_car_3> (203) wait")
                         else:
                             available_actions = []
                             
@@ -243,38 +218,49 @@ class LLMManager:
                     return obs
                     
                 def step(self, class_name, agent_id, action, task_goal):
-                    print(f"🤖 Arena环境步骤: {class_name}({agent_id}) -> {action}")
                     self.steps += 1
                     
-                    # 跟踪执行的动作状态
                     if not hasattr(self, 'executed_actions'):
                         self.executed_actions = {}
+                    if not hasattr(self, 'dialogue_history'):
+                        self.dialogue_history = ""
+                    if not hasattr(self, 'total_dialogue_history'):
+                        self.total_dialogue_history = []
                     
                     agent_key = f"{class_name}({agent_id})"
                     
-                    # 记录执行的动作
                     if agent_key not in self.executed_actions:
                         self.executed_actions[agent_key] = []
                     
                     self.executed_actions[agent_key].append(action)
                     
-                    # 构造状态反馈
+                    if agent_key not in self.agent_states:
+                        self.agent_states[agent_key] = {'status': 'idle', 'last_action': None}
+                    
+                    if "[move]" in action:
+                        self.agent_states[agent_key] = {'status': 'moved', 'last_action': 'move'}
+                    elif "[push]" in action:
+                        self.agent_states[agent_key] = {'status': 'pushed', 'last_action': 'push'}
+                    elif "[observe]" in action:
+                        self.agent_states[agent_key] = {'status': 'observed', 'last_action': 'observe'}
+
                     task_results = []
                     satisfied = []
                     unsatisfied = []
                     
                     if "[move]" in action:
-                        # Move动作完成后，标记为可以进行push
-                        satisfied.append(f"{agent_key} has moved to component location")
+                        action_result = f"{agent_key} has successfully moved to component location and is ready for push action"
+                        satisfied.append(action_result)
                         task_results.append({
                             'agent': agent_key,
-                            'action': action,
+                            'action': action, 
                             'status': 'completed',
                             'next_available': ['push', 'wait']
                         })
+                        
                     elif "[push]" in action:
-                        # Push动作完成后，标记组件已运输
-                        satisfied.append(f"{agent_key} has pushed component to franka area")
+                        action_result = f"{agent_key} has successfully pushed component to franka assembly area"
+                        satisfied.append(action_result)
                         task_results.append({
                             'agent': agent_key,
                             'action': action, 
@@ -282,13 +268,24 @@ class LLMManager:
                             'next_available': ['wait']
                         })
                     
-                    # 检查整体任务完成状态
+                    elif "[observe]" in action:
+                        area_match = re.search(r'area <([^>]+)>', action)
+                        if area_match:
+                            area = area_match.group(1)
+                            action_result = f"{agent_key} observed area {area} and found components"
+                            satisfied.append(action_result)
+                            task_results.append({
+                                'agent': agent_key,
+                                'action': action,
+                                'status': 'completed', 
+                                'next_available': ['move', 'wait']
+                            })
+                    
                     done = False
-                    if len(self.executed_actions) >= 3:  # 假设需要3个agent都执行了动作
-                        # 简单的完成检查
+                    if len(self.executed_actions) >= 3:  
                         move_count = sum(1 for actions in self.executed_actions.values() 
                                        for action in actions if "[move]" in action)
-                        if move_count >= 3:  # 至少3个move动作完成
+                        if move_count >= 3:  
                             done = True
                     
                     return done, task_results, satisfied, unsatisfied, self.steps
@@ -296,6 +293,10 @@ class LLMManager:
             env = MockEnv()
             env.envs = [None]
             env.get_positions_for_prompt = self.task.get_positions_for_prompt
+            
+
+            env.task = self.task
+            
             return env
         
         agent_configs = [
@@ -342,23 +343,54 @@ class LLMManager:
         
         if step_count % self.llm_update == 0:
             if self.arena_multi_agent:
-                action, message = self.run_llm_planning(step_count)
-                if action and action != "None":
-                    self.llm_mode_active = True
-                    self.task._execute_llm_action(action, message)
+                if not self._any_robot_executing_waypoints():
+                    action, message = self.run_llm_planning(step_count)
+                    if action and action != "None":
+                        self.llm_mode_active = True
+                        self.task._execute_llm_action(action, message)
             elif self.llm_planning_integration:
                 self.llm_planning_integration.update("请给出组装方案")
     
     def run_llm_planning(self, step_count):
         if self.arena_multi_agent:
             try:
+                self.arena_multi_agent.dialogue_history = getattr(self.task, 'dialogue_history', "")
+                self.arena_multi_agent.total_dialogue_history = getattr(self.task, 'total_dialogue_history', [])
+                
                 done, task_results, satisfied, unsatisfied, agent_id, agent_action, agent_message, steps = self.arena_multi_agent.step()
+                
+                self.task.dialogue_history = getattr(self.arena_multi_agent, 'dialogue_history', "")
+                self.task.total_dialogue_history = getattr(self.arena_multi_agent, 'total_dialogue_history', [])
+                
                 print(f"Oracle output: {agent_message}")
                 return agent_action, agent_message
             except Exception as e:
                 print(f"LLM planning failed: {e}")
                 return None, None
         return None, None
+
+    def _any_robot_executing_waypoints(self):
+        task = self.task
+        if hasattr(task, 'llm_action_type') and task.llm_action_type == "move" and hasattr(task, 'current_robot_id'):
+            robot_id = task.current_robot_id
+            simple_robot_id = robot_id - 200 if robot_id > 200 else robot_id
+            
+            if simple_robot_id == 1:
+                waypoints = getattr(task, 'waypoints', None)
+                current_idx = getattr(task, 'current_wp_idx', 0)
+            elif simple_robot_id == 2:
+                waypoints = getattr(task, 'waypoints_2', None)
+                current_idx = getattr(task, 'current_wp_idx_2', 0)
+            elif simple_robot_id == 3:
+                waypoints = getattr(task, 'waypoints_3', None)
+                current_idx = getattr(task, 'current_wp_idx_3', 0)
+            else:
+                return False
+
+            if waypoints is not None and len(waypoints) > 0 and current_idx < len(waypoints):
+                return True
+                
+        return False
     
     def update_agent_states(self):
         if self.llm_planning_integration:
@@ -380,7 +412,6 @@ class LLMManager:
     
     def get_plan_status(self):
         if self.arena_multi_agent:
-            # 如果使用ArenaMultiAgent，并且已经激活LLM模式，则返回executing
             return 'executing' if self.llm_mode_active else 'idle'
         elif self.llm_planning_integration:
             return getattr(self.llm_planning_integration, 'plan_status', 'idle')
@@ -467,6 +498,10 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.current_target_id = None
         self.current_target_name = None
         self.llm_action_type = None
+        
+        # 初始化对话历史用于LLM状态上下文
+        self.dialogue_history = ""
+        self.total_dialogue_history = []
         
         # 初始化robot相关属性
         self.current_robot_name = None
@@ -577,8 +612,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._build_target_state_tensors()
         self._reset_target([0])
         
-            
-       
     def _build_lift_body_ids_tensor(self, lift_body_names):
         env_ptr = self.envs[0]
         actor_handle = self.humanoid_handles[0]
@@ -1962,31 +1995,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                    component_wheel_2_state_tensor, component_body_state_tensor,
                    all_root_state, step_size):
         if self.current_wp_idx >= len(self.waypoints):
-            if not hasattr(self, '_waypoints_reset') or not self._waypoints_reset:
-                robot_pos = mobile_robot_state_tensor[0:2]
-
-                component_states = [component_wheel_1_state_tensor, component_wheel_2_state_tensor, component_body_state_tensor]
-                box_positions = torch.stack([cs[0:2] for cs in component_states], dim=0)
-                
-                dists = torch.norm(robot_pos.unsqueeze(0) - box_positions, dim=1)
-                nearest_box_idx = torch.argmin(dists)
-                nearest_box_pos = box_positions[nearest_box_idx].cpu().numpy()
-                
-                if nearest_box_pos[0] >= 0 and nearest_box_pos[1] >= 0:  # (4,8) 
-                    self._reset_car_target([0])
-                    print(f"Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target")
-                elif nearest_box_pos[0] >= 0 and nearest_box_pos[1] < 0:  # (4,-8) 
-                    self._reset_car_target2([0])
-                    print(f"Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target2")
-                elif nearest_box_pos[0] < 0 and nearest_box_pos[1] < 0:  # (-4,-8) 
-                    self._reset_car_target3([0])
-                    print(f"Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target3")
-                elif nearest_box_pos[0] < 0 and nearest_box_pos[1] >= 0:  # (-4,8) 
-                    self._reset_car_target4([0])
-                    print(f"Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target4")
-                
-                self.current_wp_idx = 0
-                self._waypoints_reset = True
             return
             
         current_waypoint = self.waypoints[self.current_wp_idx]
@@ -2024,36 +2032,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         component_wheel_1_state_tensor = all_root_state[-14]
         component_body_state_tensor = all_root_state[-6]
 
-        if self.current_wp_idx_2 == len(self.waypoints_2):
-            if not hasattr(self, '_waypoints_reset_2') or not self._waypoints_reset_2:
-                robot_pos = mobile_robot_2_state_tensor[0:2]
-
-                component_states = [component_wheel_1_state_tensor, component_wheel_2_state_tensor, component_body_state_tensor]
-                box_positions = torch.stack([cs[0:2] for cs in component_states], dim=0)
-                
-                dists = torch.norm(robot_pos.unsqueeze(0) - box_positions, dim=1)
-                nearest_box_idx = torch.argmin(dists)
-                nearest_box_pos = box_positions[nearest_box_idx].cpu().numpy()
-                
-                if nearest_box_pos[0] >= 0 and nearest_box_pos[1] >= 0:  # (4,8) 
-                    self._reset_car_target([0], robot_id=2)
-                    print(f"Robot 2: Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target")
-                elif nearest_box_pos[0] >= 0 and nearest_box_pos[1] < 0:  # (4,-8) 
-                    self._reset_car_target2([0], robot_id=2)
-                    print(f"Robot 2: Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target2")
-                elif nearest_box_pos[0] < 0 and nearest_box_pos[1] < 0:  # (-4,-8) 
-                    self._reset_car_target3([0], robot_id=2)
-                    print(f"Robot 2: Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target3")
-                elif nearest_box_pos[0] < 0 and nearest_box_pos[1] >= 0:  # (-4,8) 
-                    self._reset_car_target4([0], robot_id=2)
-                    print(f"Robot 2: Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target4")
-                
-                self.current_wp_idx_2 = 0
-                self._waypoints_reset_2 = True
-            # if self.franka_task_stage == 3:
-            #     self._handle_robot_2_final_push(mobile_robot_2_state_tensor, 
-            #                                 component_wheel_2_state_tensor, 
-            #                                 all_root_state, step_size)
+        if self.current_wp_idx_2 >= len(self.waypoints_2):
             return
             
         current_waypoint = self.waypoints_2[self.current_wp_idx_2]
@@ -2086,32 +2065,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                     all_root_state, step_size):
         component_wheel_1_state_tensor = all_root_state[-14]
         component_wheel_2_state_tensor = all_root_state[-5]
-        if self.current_wp_idx_3 == len(self.waypoints_3):
-            if not hasattr(self, '_waypoints_reset_3') or not self._waypoints_reset_3:
-                robot_pos = mobile_robot_3_state_tensor[0:2]
-
-                component_states = [component_wheel_1_state_tensor, component_wheel_2_state_tensor, component_body_state_tensor]
-                box_positions = torch.stack([cs[0:2] for cs in component_states], dim=0)
-                
-                dists = torch.norm(robot_pos.unsqueeze(0) - box_positions, dim=1)
-                nearest_box_idx = torch.argmin(dists)
-                nearest_box_pos = box_positions[nearest_box_idx].cpu().numpy()
-                
-                if nearest_box_pos[0] >= 0 and nearest_box_pos[1] >= 0:  # (4,8) 
-                    self._reset_car_target([0], robot_id=3)
-                    print(f"Robot 3: Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target")
-                elif nearest_box_pos[0] >= 0 and nearest_box_pos[1] < 0:  # (4,-8) 
-                    self._reset_car_target2([0], robot_id=3)
-                    print(f"Robot 3: Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target2")
-                elif nearest_box_pos[0] < 0 and nearest_box_pos[1] < 0:  # (-4,-8) 
-                    self._reset_car_target3([0], robot_id=3)
-                    print(f"Robot 3: Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target3")
-                elif nearest_box_pos[0] < 0 and nearest_box_pos[1] >= 0:  # (-4,8) 
-                    self._reset_car_target4([0], robot_id=3)
-                    print(f"Robot 3: Nearest box at ({nearest_box_pos[0]:.1f}, {nearest_box_pos[1]:.1f}), using _reset_car_target4")
-                
-                self.current_wp_idx_3 = 0
-                self._waypoints_reset_3 = True
+        if self.current_wp_idx_3 >= len(self.waypoints_3):
             return
             
         current_waypoint = self.waypoints_3[self.current_wp_idx_3]
@@ -2400,7 +2354,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 area = self._get_component_area("trunk")
                 self._assign_waypoints_by_area("mobile_car_3", area)
         
-
     def push_box_with_robot(self, robot_id):
         if robot_id == 1:
             handle = self.mobile_handles[0]
@@ -2453,105 +2406,109 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
     
     def _execute_llm_action(self, agent_action, agent_message):
         try:
+            robot_match = re.search(r'<([^>]+)>\s*\((\d+)\)', agent_action)
+            action_type = None
+            
             if "[move]" in agent_action:
-                # [move] <mobile_car> (202) move to component location using RRT path
-                robot_match = re.search(r'<([^>]+)>\s*\((\d+)\)', agent_action)
-                if robot_match:
-                    robot_name = robot_match.group(1)
-                    robot_id = int(robot_match.group(2))
-                    print(f"🚶 [move] 动作: {robot_name}({robot_id})")
-                    
-                    self.current_robot_name = robot_name
-                    self.current_robot_id = robot_id
-                    self.llm_action_type = "move"
-                    
-                    # 转换robot_id: 201->1, 202->2, 203->3
-                    simple_robot_id = robot_id - 200 if robot_id > 200 else robot_id
-                    
-                    if robot_id == 201:  # mobile_car_1
-                        self.current_target_id = 0  # left wheel (405)
-                        self.current_target_name = "left_wheel"
-                    elif robot_id == 202:  # mobile_car_2
-                        self.current_target_id = 1  # right wheel (406)
-                        self.current_target_name = "right_wheel"
-                    elif robot_id == 203:  # mobile_car_3
-                        self.current_target_id = 2  # trunk (303)
-                        self.current_target_name = "trunk"
-                    
-                    # 使用统一接口
-                    self.execute_robot_action(simple_robot_id, "move")
-                    
-                else:
-                    if "left wheel" in agent_message or "<left wheel>" in agent_message:
-                        self.current_target_id = 0
-                        self.current_target_name = "left_wheel"
-                        self.execute_robot_action(1, "move")  # 默认用robot 1
-                    elif "right wheel" in agent_message or "<right wheel>" in agent_message:
-                        self.current_target_id = 1
-                        self.current_target_name = "right_wheel"
-                        self.execute_robot_action(2, "move")  # 默认用robot 2
-                    elif "trunk" in agent_message or "<trunk>" in agent_message:
-                        self.current_target_id = 2
-                        self.current_target_name = "trunk"
-                        self.execute_robot_action(3, "move")  # 默认用robot 3
-                    else:
-                        self.current_target_id = 0
-                        self.current_target_name = "left_wheel"
-                        self.execute_robot_action(1, "move")
-            
-            # 处理 [movetowards] 格式 (保持向后兼容)
-            elif "[movetowards]" in agent_action:
-                target_match = re.search(r'<([^>]+)>\((\d+)\)', agent_action)
-                if target_match:
-                    target_name = target_match.group(1)
-                    target_id = int(target_match.group(2))  
-                    print(f"🚶 移动到目标: {target_name}({target_id})")
-                    
-                    self.current_target_id = target_id
-                    self.current_target_name = target_name
-                    self.llm_action_type = "movetowards"
-                    
-                    if "trunk" in target_name:
-                        self.move_robot("mobile_car", "D")
-                    elif "wheel" in target_name:
-                        if "left" in target_name:
-                            self.move_robot("mobile_car", "B") 
-                        else:
-                            self.move_robot("mobile_car", "C")
-            
-            # 处理 [push] 格式
+                action_type = "move"
             elif "[push]" in agent_action:
-                robot_match = re.search(r'<([^>]+)>\s*\((\d+)\)', agent_action)
-                if robot_match:
-                    robot_name = robot_match.group(1)
-                    robot_id = int(robot_match.group(2))
-                    print(f"📦 [push] 动作: {robot_name}({robot_id})")
-                    
-                    # 转换robot_id: 201->1, 202->2, 203->3
-                    simple_robot_id = robot_id - 200 if robot_id > 200 else robot_id
-                    
-                    self.current_robot_name = robot_name
-                    self.current_robot_id = robot_id
-                    self.llm_action_type = "push"
-                    self._llm_push_mode = True
-                    
-                    # 设置目标信息
-                    if robot_id == 201:
-                        self.current_target_name = "left_wheel"
-                    elif robot_id == 202:
-                        self.current_target_name = "right_wheel" 
-                    elif robot_id == 203:
-                        self.current_target_name = "trunk"
-                    
-                    self.execute_robot_action(simple_robot_id, "push")
+                action_type = "push"
+            elif "[check]" in agent_action:
+                action_type = "check"
+            elif "[pick]" in agent_action:
+                action_type = "pick"
+            elif "[wait]" in agent_action:
+                action_type = "wait"
+            elif "[walk]" in agent_action:
+                action_type = "walk"
+            elif "[carry]" in agent_action:
+                action_type = "carry"
+            elif "[movetowards]" in agent_action:
+                action_type = "movetowards"
             
+            if robot_match and action_type:
+                robot_name = robot_match.group(1)
+                robot_id = int(robot_match.group(2))
+                
+                target_match = re.search(r'<([^>]+)>\s*\((\d+)\)', agent_action.split('> (')[1] if '> (' in agent_action and agent_action.count('<') > 1 else '')
+                target_name = target_match.group(1) if target_match else ""
+                
+                self._set_current_context(robot_name, robot_id, target_name)
+                self._dispatch_action(action_type, robot_name, target_name, robot_id)
+                
             else:
                 print(f"⚠️ 未识别的LLM动作格式: {agent_action}")
-            
+                
         except Exception as e:
             print(f"❌ 执行LLM动作失败: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _set_current_context(self, robot_name, robot_id, target_name=""):
+        self.current_robot_name = robot_name
+        self.current_robot_id = robot_id
+        
+        if robot_id == 201 or "left wheel" in target_name.lower():
+            self.current_target_id = 0
+            self.current_target_name = "left_wheel"
+        elif robot_id == 202 or "right wheel" in target_name.lower():
+            self.current_target_id = 1
+            self.current_target_name = "right_wheel"
+        elif robot_id == 203 or "trunk" in target_name.lower():
+            self.current_target_id = 2
+            self.current_target_name = "trunk"
+    
+    def _dispatch_action(self, action_type, robot_name, target_name, robot_id):
+        self.llm_action_type = action_type
+        
+        if action_type == "move":
+            if "mobile_car" in robot_name:
+                simple_robot_id = robot_id - 200 if robot_id > 200 else robot_id
+                self.execute_robot_action(simple_robot_id, "move")
+            else:
+                area = self._get_target_area(target_name)
+                self.move_robot(robot_name, area)
+                
+        elif action_type == "push":
+            self._llm_push_mode = True
+            if "mobile_car" in robot_name:
+                simple_robot_id = robot_id - 200 if robot_id > 200 else robot_id
+                self.execute_robot_action(simple_robot_id, "push")
+            else:
+                self.push_component(robot_name, target_name)
+                
+        elif action_type == "check":
+            if "franka" in robot_name:
+                self.franka_check(robot_name, target_name)
+            else:
+                print(f"Check action for {robot_name} on {target_name}")
+                
+        elif action_type == "pick":
+            print(f"Pick action: {robot_name} picking {target_name}")
+            
+        elif action_type == "wait":
+            self.wait_agent(robot_name)
+            
+        elif action_type == "walk":
+            area = self._get_target_area(target_name)
+            self.walk_humanoid(robot_name, area)
+            
+        elif action_type == "carry":
+            self.carry_obstacle(robot_name, target_name)
+            
+        elif action_type == "movetowards":
+            area = self._get_target_area(target_name)
+            self.move_robot(robot_name, area)
+    
+    def _get_target_area(self, target_name):
+        if "trunk" in target_name.lower():
+            return "D"
+        elif "left" in target_name.lower() and "wheel" in target_name.lower():
+            return "B"
+        elif "right" in target_name.lower() and "wheel" in target_name.lower():
+            return "C"
+        else:
+            return "A"
 
     # LLM 技能执行方法
     def explore_area(self, robot_name, area_name):
@@ -2584,12 +2541,51 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         print(f"{robot_name} pushing component {target_name}")
         target_id = getattr(self, 'current_target_id', None)
         actual_robot_name = self._convert_llm_robot_name(robot_name, target_id)
-        # 这里可以添加具体的推动逻辑
+
         
     def franka_check(self, robot_name, target_name):
-        """Franka 检查目标"""
         print(f"Franka {robot_name} checking {target_name}")
         
+        root = self.gym.acquire_actor_root_state_tensor(self.sim)
+        root = gymtorch.wrap_tensor(root)
+        
+        franka_idx = self.gym.get_actor_index(self.envs[0], self.franka_handles[0], gymapi.DOMAIN_SIM)
+        franka_state_tensor = root[franka_idx]
+        
+        near_thresh = 0.6
+        
+        if "left wheel" in target_name.lower():
+            if hasattr(self, 'component_cube_handles') and len(self.component_cube_handles) > 0:
+                component_idx = self.gym.get_actor_index(self.envs[0], self.component_cube_handles[0], gymapi.DOMAIN_SIM)
+                component_state_tensor = root[component_idx]
+                distance = torch.norm(component_state_tensor[0:2] - franka_state_tensor[0:2])
+                d = float(distance.item())
+                
+                if d < near_thresh:
+                    print(f"✅ Left wheel has arrived at franka area (distance: {d:.3f})")
+                    return True
+                else:
+                    print(f"❌ Left wheel not yet at franka area (distance: {d:.3f}, threshold: {near_thresh})")
+                    return False
+        
+        elif "right wheel" in target_name.lower():
+            if hasattr(self, 'component_cube_handles') and len(self.component_cube_handles) > 1:
+                component_idx = self.gym.get_actor_index(self.envs[0], self.component_cube_handles[1], gymapi.DOMAIN_SIM)
+                component_state_tensor = root[component_idx]
+                distance = torch.norm(component_state_tensor[0:2] - franka_state_tensor[0:2])
+                d = float(distance.item())
+                
+                if d < near_thresh:
+                    print(f"✅ Right wheel has arrived at franka area (distance: {d:.3f})")
+                    return True
+                else:
+                    print(f"❌ Right wheel not yet at franka area (distance: {d:.3f}, threshold: {near_thresh})")
+                    return False
+        
+        else:
+            print(f"⚠️ Unknown target: {target_name}")
+            return False
+
     def wait_agent(self, robot_name):
         """等待智能体"""
         print(f"Agent {robot_name} waiting")
@@ -2955,30 +2951,87 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._update_robot_3(mobile_robot_3_state_tensor, component_body_state_tensor,
                             all_root_state, step_size)
         
+    def _generate_push_waypoints_for_robot(self, robot_id):
+        env_ptr = self.envs[0]
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        
+        if robot_id == 1:
+            robot_handle = self.mobile_handles[0]
+            box_handle = self.component_cube_handles[0]
+        elif robot_id == 2:
+            robot_handle = self.mobile_handles[1] 
+            box_handle = self.component_cube_handles[1]
+        elif robot_id == 3:
+            robot_handle = self.mobile_handles[2]
+            box_handle = self.component_cube_handles[2]
+        else:
+            return
+            
+        robot_idx = self.gym.get_actor_index(env_ptr, robot_handle, gymapi.DOMAIN_SIM)
+        box_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
+        robot_pos = all_root_state[robot_idx, 0:2].cpu().numpy()
+        box_pos = all_root_state[box_idx, 0:2].cpu().numpy()
+        
+        # 根据box位置生成推箱子waypoints
+        if box_pos[0] >= 0 and box_pos[1] >= 0:
+            self._reset_car_target([0], robot_id=robot_id)
+        elif box_pos[0] >= 0 and box_pos[1] < 0:
+            self._reset_car_target2([0], robot_id=robot_id)
+        elif box_pos[0] < 0 and box_pos[1] < 0:
+            self._reset_car_target3([0], robot_id=robot_id)  
+        elif box_pos[0] < 0 and box_pos[1] >= 0:
+            self._reset_car_target4([0], robot_id=robot_id)
+            
+        print(f"🚀 Robot {robot_id} 生成推箱子waypoints，box位置: ({box_pos[0]:.1f}, {box_pos[1]:.1f})")
+
+    def _update_specific_robot(self, robot_id):
+        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        all_root_state = gymtorch.wrap_tensor(root_state)
+        
+        step_size = torch.norm(self.update_pos)
+        
+        if robot_id == 1:
+            mobile_robot_state_tensor = all_root_state[-1]
+            component_wheel_1_state_tensor = all_root_state[-14]
+            component_wheel_2_state_tensor = all_root_state[-5]
+            component_body_state_tensor = all_root_state[-6]
+            self._update_robot_1(mobile_robot_state_tensor, component_wheel_1_state_tensor, 
+                                component_wheel_2_state_tensor, component_body_state_tensor, 
+                                all_root_state, step_size)
+        elif robot_id == 2:
+            mobile_robot_2_state_tensor = all_root_state[-2]
+            component_wheel_2_state_tensor = all_root_state[-5]
+            self._update_robot_2(mobile_robot_2_state_tensor, component_wheel_2_state_tensor,
+                                all_root_state, step_size)
+        elif robot_id == 3:
+            mobile_robot_3_state_tensor = all_root_state[-3]
+            component_body_state_tensor = all_root_state[-6]
+            self._update_robot_3(mobile_robot_3_state_tensor, component_body_state_tensor,
+                                all_root_state, step_size)
+        
         self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(all_root_state))
 
     def _update_mobile_robots_llm_mode(self):
-        # 检查是否等待规划完成
         if getattr(self, '_llm_waiting_for_plan', True):
             return
         
-        # 检查当前技能状态
         current_skill = self._get_current_executing_skill()
         if current_skill in ['A', 'B', 'C', 'D']:
             return
         
-        # 检查LLM是否启用
         if not self.llm_manager.enable_llm:
             return
-        
-        # 检查计划状态  
+
         plan_status = self.llm_manager.get_plan_status()
         if plan_status != 'executing':
             return
 
-        # 处理推送模式
         if getattr(self, '_llm_push_mode', False):
-            self._update_mobile_robots()
+            if hasattr(self, 'current_robot_id'):
+                robot_full_id = self.current_robot_id
+                simple_robot_id = robot_full_id - 200 if robot_full_id > 200 else robot_full_id
+                self._update_specific_robot(simple_robot_id)
             return
         
         # 持续执行移动动作 - 只移动LLM指定的robot
@@ -2986,52 +3039,11 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             if hasattr(self, 'current_robot_id'):
                 robot_full_id = self.current_robot_id
                 simple_robot_id = robot_full_id - 200 if robot_full_id > 200 else robot_full_id
-                self.move_robot_to_component(simple_robot_id)
+                self._update_specific_robot(simple_robot_id)
                 return  
         
-        # 非LLM指定动作时的备用waypoints逻辑
-        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        all_root_state = gymtorch.wrap_tensor(root_state)
-        
-        mobile_robot_state_tensor = all_root_state[-1]
-        mobile_robot_2_state_tensor = all_root_state[-2]  
-        mobile_robot_3_state_tensor = all_root_state[-3]
-        
-        step_size = torch.norm(self.update_pos)
-        
-        if hasattr(self, 'waypoints') and self.waypoints is not None and len(self.waypoints) > 0:
-            if self.current_wp_idx < len(self.waypoints):
-                current_waypoint = self.waypoints[self.current_wp_idx]
-                self._move_to_waypoint(mobile_robot_state_tensor, current_waypoint, all_root_state, step_size, robot_id=1)
-                
-                if torch.norm(mobile_robot_state_tensor[0:2] - current_waypoint[0:2]) < 0.3:
-                    self.current_wp_idx += 1
-                    if self.current_wp_idx >= len(self.waypoints):
-                        print(f"🎯 Robot 1 完成所有waypoints")
-
-        if hasattr(self, 'waypoints_2') and self.waypoints_2 is not None and len(self.waypoints_2) > 0:
-            if self.current_wp_idx_2 < len(self.waypoints_2):
-                current_waypoint = self.waypoints_2[self.current_wp_idx_2]
-                self._move_to_waypoint(mobile_robot_2_state_tensor, current_waypoint, all_root_state, step_size, robot_id=2)
-
-                if torch.norm(mobile_robot_2_state_tensor[0:2] - current_waypoint[0:2]) < 0.3:
-                    self.current_wp_idx_2 += 1 
-                    if self.current_wp_idx_2 >= len(self.waypoints_2):
-                        print(f"🎯 Robot 2 完成所有waypoints")
-                        
-
-        if hasattr(self, 'waypoints_3') and self.waypoints_3 is not None and len(self.waypoints_3) > 0:
-            if self.current_wp_idx_3 < len(self.waypoints_3):
-                current_waypoint = self.waypoints_3[self.current_wp_idx_3]
-                self._move_to_waypoint(mobile_robot_3_state_tensor, current_waypoint, all_root_state, step_size, robot_id=3)
-                
-                # 检查是否到达当前waypoint
-                if torch.norm(mobile_robot_3_state_tensor[0:2] - current_waypoint[0:2]) < 0.3:
-                    self.current_wp_idx_3 += 1
-                    if self.current_wp_idx_3 >= len(self.waypoints_3):
-                        print(f"🎯 Robot 3 完成所有waypoints")
-        
-        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(all_root_state))
+        # LLM模式下不执行通用waypoints逻辑，避免同时移动所有机器人
+        print("⚠️ LLM模式激活，但没有指定机器人ID，跳过通用更新")
 
     def _get_current_executing_skill(self):
         try:
@@ -3070,7 +3082,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self._llm_mode_initialized = True
                 self.llm_manager.llm_mode_active = True
                 self._llm_waiting_for_plan = True
-                print("🤖 LLM系统启动，机器人等待规划完成...")
             
             # 定期调用LLM更新
             self.llm_manager.update(int(self.progress_buf[0]))
@@ -3088,7 +3099,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self._llm_waiting_for_plan = False
                 if not hasattr(self, '_llm_execution_started'):
                     self._llm_execution_started = True
-                    print(f"🚀 LLM规划完成，开始执行！")
                     
             elif plan_status == "completed":
                 self.llm_manager.llm_mode_active = True
