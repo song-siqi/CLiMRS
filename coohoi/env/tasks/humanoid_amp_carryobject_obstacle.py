@@ -59,8 +59,6 @@ def interpolate(start: Pose, end: Pose, step_size: float = None, num_steps: int 
     return path
 
 def convert_wz(w: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-    if not (w.shape == z.shape):
-        raise ValueError("w 和 z 的形状必须相同")
     quat_x = torch.zeros_like(z)
     quat_y = torch.zeros_like(z)
     return torch.stack([quat_x, quat_y, z, w], dim=-1)
@@ -100,6 +98,7 @@ class LLMManager:
         args.env = 'env0'
         args.api_key = None
         args.organization = None
+        args.encoding = 'utf-8'
         args.oracle_prompt_path = 'LLM/dev_revision/prompt/oracle_prompt.txt'
         args.agent_selection_prompt_path = 'LLM/dev_revision/prompt/agent_selection_prompt.txt'
         args.quadrotor_prompt_path = 'LLM/dev_revision/prompt/quadrotor_prompt.txt'
@@ -110,7 +109,7 @@ class LLMManager:
         args.select_agents = False
         
         def env_fn():
-            task_ref = self.task  # 捕获真实任务的引用（LLMManager.task）  
+            task_ref = self.task 
             class MockEnv:
                 def __init__(self):
                     self.task = task_ref  
@@ -122,13 +121,13 @@ class LLMManager:
                     self.task_name = "robot_assembly"
                     self.ground_truth_step_num = 10
                     self.num_agent = 5  # humanoid + franka + 3 mobile_cars
-                    self.agent_states = {}  # 跟踪每个agent的状态
+                    self.agent_states = {}  
                     self.id_name_dict = {
                         0: ('humanoid', 101), 
                         1: ('franka', 606), 
-                        2: ('mobile_car_1', 201),  # 处理left wheel
-                        3: ('mobile_car_2', 202),  # 处理right wheel  
-                        4: ('mobile_car_3', 203)   # 处理trunk
+                        2: ('mobile_car_1', 201),  # left wheel
+                        3: ('mobile_car_2', 202),  # right wheel  
+                        4: ('mobile_car_3', 203)   # trunk
                     }
                     
                 def get_observations(self):
@@ -427,7 +426,12 @@ class LLMManager:
 
     def _any_robot_executing_waypoints(self):
         task = self.task
-        # 检查move或push动作是否在执行
+        if hasattr(task, 'llm_action_type') and task.llm_action_type == "walk":
+            if task.llm_action_type == "walk_completed":
+                return False 
+            else:
+                return True  
+        
         if hasattr(task, 'llm_action_type') and task.llm_action_type in ["move", "push"] and hasattr(task, 'current_robot_id'):
             robot_id = task.current_robot_id
             simple_robot_id = robot_id - 200 if robot_id > 200 else robot_id
@@ -446,8 +450,7 @@ class LLMManager:
 
             if waypoints is not None and len(waypoints) > 0 and current_idx < len(waypoints):
                 return True
-        
-        # 检查是否有push模式激活
+ 
         if hasattr(task, '_llm_push_mode') and getattr(task, '_llm_push_mode', False):
             return True
                 
@@ -554,13 +557,11 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.wait_counter = 0
 
         self.current_area_positions = {}
-        
-        # 初始化目标ID相关属性
+
         self.current_target_id = None
         self.current_target_name = None
         self.llm_action_type = None
-        
-        # 初始化对话历史用于LLM状态上下文
+
         self.dialogue_history = ""
         self.total_dialogue_history = []
         
@@ -570,32 +571,28 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             'mobile_car_2(202)': {'status': 'idle', 'last_action': None}, 
             'mobile_car_3(203)': {'status': 'idle', 'last_action': None}
         }
-        
-        # 初始化robot相关属性
+
         self.current_robot_name = None
         self.current_robot_id = None
         
-        # 创建target_id到处理函数的映射
         self.target_id_handlers = {
             0: self._handle_component_0,  # wheel1
             1: self._handle_component_1,  # wheel2  
             2: self._handle_component_2,  # trunk/body
         }
-        
-        # 创建target_id到robot的映射 (三个mobile_car分别处理不同的component)
+
         self.target_id_to_robot_mapping = {
             0: 'robot1',    # left wheel (405) -> robot1 处理
             1: 'robot2',    # right wheel (406) -> robot2 处理  
             2: 'robot3',    # trunk (303) -> robot3 处理
         }
         
-        # LLM robot名称到实际robot名称的映射
         self.llm_robot_name_mapping = {
             'mobile_car_1': 'robot1',    # mobile_car_1 (201) -> robot1
             'mobile_car_2': 'robot2',    # mobile_car_2 (202) -> robot2
             'mobile_car_3': 'robot3',    # mobile_car_3 (203) -> robot3
             'mobile_car': 'robot1',      # 向后兼容旧格式
-            'humanoid': 'robot2',        # 如果有humanoid相关动作
+            'humanoid': 'humanoid',      
             'franka': 'franka',          # franka保持原名
             'robot_arm': 'franka',       # robot_arm也是franka
         }
@@ -1060,7 +1057,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             collision_risks = self.llm_manager.check_collision_risks()
             self.llm_manager.execute_safety_control(collision_risks)
             if any(self.llm_manager.get_mobile_robot_stop_flags().values()):
-                print("⚠️  LLM系统检测到碰撞风险，部分小车已停止，跳过路径规划")
+                print("WARNING: LLM系统检测到碰撞风险，部分小车已停止，跳过路径规划")
                 return
         
         if not hasattr(self, '_waypoints_initialized') or not self._waypoints_initialized:
@@ -1090,9 +1087,9 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self.rrt_paths_initial = paths1  
             
             if self.llm_manager.enable_llm:
-                print("✅ RRT路径规划完成，LLM系统已更新")
+                print("SUCCESS: RRT路径规划完成，LLM系统已更新")
 
-    # franka location entity
+## franka location entity
     def _build_franka(self, env_id, env_ptr):
         col_group = env_id
         col_filter = 0
@@ -1830,7 +1827,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self.franka_task_stage_1 = 0
                 import pdb; pdb.set_trace() 
 
-    ## mobile robots ##
+## mobile robots ##
     def keep_cube_attached_to_box(self, cube_handle, box_handle):
         # Magnetic logic, component_handles is the component, box_handles is the corresponding box.
         if not self.component_handles or not self._box_handles:
@@ -2219,7 +2216,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                     else:
                         self.agent_states['mobile_car_3(203)'] = {'status': 'moved', 'last_action': 'move'}
                         
-
     def _push_nearest_box(self, robot_state, component_states, component_idxs, direction, step_size, all_root_state):
         box_pos = torch.stack([cs[0:2] for cs in component_states], dim=0)
         dists = torch.norm(robot_state[0:2].unsqueeze(0) - box_pos, dim=1)
@@ -2291,6 +2287,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         robot_state_idx = -robot_id  
         all_root_state[robot_state_idx, 3:7] = new_quat
 
+## humanoid carry object obstacle ##
     def _reset_target(self, env_ids):
         n = len(env_ids)
         random_numbers = torch.rand(
@@ -2367,7 +2364,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._target_rot[env_ids] = rand_rot
         return
     
-    ## LLM Integrated ##
+## LLM Integrated ##
     def get_positions_for_prompt(self, env_id, env_ptr):
         """return LLM API (area_positions, agent_positions)"""
         root = self.gym.acquire_actor_root_state_tensor(self.sim)
@@ -2418,16 +2415,16 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             handle = self.mobile_handles[2]
             agent_key = 'mobile_car_3(203)'
         else:
-            print(f"⚠️ 未知robot_id: {robot_id}")
+            print(f"WARNING: 未知robot_id: {robot_id}")
             return
 
         if waypoints is None:
-            print(f"⚠️ Robot {robot_id} waypoints未初始化，尝试生成路径")
+            print(f"WARNING: Robot {robot_id} waypoints未初始化，尝试生成路径")
             self._generate_rrt_path_for_robot(robot_id)
             return
         
         if len(waypoints) == 0:
-            print(f"⚠️ Robot {robot_id} waypoints为空")
+            print(f"WARNING: Robot {robot_id} waypoints为空")
             return
             
         if wp_idx >= len(waypoints):
@@ -2498,7 +2495,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self.current_wp_idx_3 = 0
             agent_key = 'mobile_car_3(203)'
         else:
-            print(f"⚠️ 未知robot_id: {robot_id}")
+            print(f"WARNING: 未知robot_id: {robot_id}")
             return
 
         if hasattr(self, 'agent_states') and agent_key in self.agent_states:
@@ -2511,9 +2508,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self.move_robot_to_component(robot_id)
         elif action_type == "push":
             self.push_box_with_robot(robot_id)
-        else:
-            print(f"⚠️ 未知动作类型: {action_type}")
-    
+  
     def _execute_llm_action(self, agent_action, agent_message):
         try:
             robot_match = re.search(r'<([^>]+)>\s*\((\d+)\)', agent_action)
@@ -2547,10 +2542,10 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self._dispatch_action(action_type, robot_name, target_name, robot_id)
                 
             else:
-                print(f"⚠️ 未识别的LLM动作格式: {agent_action}")
+                print(f"WARNING: 未识别的LLM动作格式: {agent_action}")
                 
         except Exception as e:
-            print(f"❌ 执行LLM动作失败: {e}")
+            print(f"ERROR: 执行LLM动作失败: {e}")
             import traceback
             traceback.print_exc()
     
@@ -2625,12 +2620,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         else:
             return "A"
 
-    # LLM 技能执行方法
-    def explore_area(self, robot_name, area_name):
-        target_id = getattr(self, 'current_target_id', None)
-        actual_robot_name = self._convert_llm_robot_name(robot_name, target_id)
-        self._assign_waypoints_by_area(actual_robot_name, area_name)
-        
+## LLM 技能执行方法 ##       
     def move_robot(self, robot_name, area_name):
         print(f"🚶 Moving {robot_name} to area {area_name}")
         target_id = getattr(self, 'current_target_id', None)
@@ -2677,10 +2667,10 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 d = float(distance.item())
                 
                 if d < near_thresh:
-                    print(f"✅ Left wheel has arrived at franka area (distance: {d:.3f})")
+                    print(f"SUCCESS: Left wheel has arrived at franka area (distance: {d:.3f})")
                     return True
                 else:
-                    print(f"❌ Left wheel not yet at franka area (distance: {d:.3f}, threshold: {near_thresh})")
+                    print(f"ERROR: Left wheel not yet at franka area (distance: {d:.3f}, threshold: {near_thresh})")
                     return False
         
         elif "right wheel" in target_name.lower():
@@ -2691,14 +2681,14 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 d = float(distance.item())
                 
                 if d < near_thresh:
-                    print(f"✅ Right wheel has arrived at franka area (distance: {d:.3f})")
+                    print(f"SUCCESS: Right wheel has arrived at franka area (distance: {d:.3f})")
                     return True
                 else:
-                    print(f"❌ Right wheel not yet at franka area (distance: {d:.3f}, threshold: {near_thresh})")
+                    print(f"ERROR: Right wheel not yet at franka area (distance: {d:.3f}, threshold: {near_thresh})")
                     return False
         
         else:
-            print(f"⚠️ Unknown target: {target_name}")
+            print(f"WARNING: Unknown target: {target_name}")
             return False
 
     def wait_agent(self, robot_name):
@@ -2706,9 +2696,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         print(f"Agent {robot_name} waiting")
         
     def _get_component_area(self, component_name):
-        """动态获取组件所在的区域"""
         try:
-            # 获取当前的组件位置
             root = self.gym.acquire_actor_root_state_tensor(self.sim)
             root = gymtorch.wrap_tensor(root)
             
@@ -2727,7 +2715,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 handle = component_handles.get('trunk')
             
             if handle is None:
-                print(f"⚠️ 无法找到组件 {component_name} 的handle，使用默认区域")
+                print(f"WARNING: 无法找到组件 {component_name} 的handle，使用默认区域")
                 return 'A'  # 默认区域
             
             idx = self.gym.get_actor_index(self.envs[0], handle, gymapi.DOMAIN_SIM)
@@ -2751,23 +2739,21 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             return 'A'  # 出错时返回默认区域
         
     def _convert_llm_robot_name(self, llm_robot_name, target_id=None):
-        """将LLM规划的robot名称转换为实际的robot名称"""
-        # 优先使用直接的名称映射
         if llm_robot_name in self.llm_robot_name_mapping:
             actual_name = self.llm_robot_name_mapping[llm_robot_name]
             print(f"🔄 名称转换: {llm_robot_name} -> {actual_name}")
             return actual_name
-        # 回退到基于target_id的映射（向后兼容）
+
         elif llm_robot_name == 'mobile_car' and target_id is not None:
             if target_id in self.target_id_to_robot_mapping:
                 actual_name = self.target_id_to_robot_mapping[target_id]
-                print(f"🔄 Mobile car名称转换: {llm_robot_name}(target_id={target_id}) -> {actual_name}")
+                print(f"INFO: Mobile car名称转换: {llm_robot_name}(target_id={target_id}) -> {actual_name}")
                 return actual_name
             else:
-                print(f"⚠️ 未找到target_id={target_id}的mobile_car映射，使用robot1")
+                print(f"WARNING: 未找到target_id={target_id}的mobile_car映射，使用robot1")
                 return 'robot1'
         else:
-            print(f"⚠️ 未找到{llm_robot_name}的映射，使用原名称")
+            print(f"WARNING: 未找到{llm_robot_name}的映射，使用原名称")
             return llm_robot_name
         
     def _handle_component_0(self):
@@ -3165,9 +3151,10 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             
             return 'Unknown'
         except Exception as e:
-            print(f"⚠️  获取当前技能失败: {e}")
+            print(f"WARNING: 获取当前技能失败: {e}")
             return 'Unknown'
 
+## system function ##
     def _reset_env_tensors(self, env_ids):
         super()._reset_env_tensors(env_ids)
         box_env_ids_int32 = self._box_actor_ids[env_ids]
@@ -3212,7 +3199,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self._llm_waiting_for_plan = False
                 if not hasattr(self, '_llm_execution_completed'):
                     self._llm_execution_completed = True
-                    print(f"✅ LLM规划执行完成！")
+                    print(f"SUCCESS: LLM规划执行完成！")
                     
             else:
                 self.llm_manager.llm_mode_active = True

@@ -83,4 +83,25 @@ EXAMPLE OUTPUT FORMAT:
 "Hello <mobile_car_2>(202): Please use [move] skill to navigate to <right wheel>(406) location, then use [push] skill to transport it to the franka assembly area."
 "Hello <mobile_car_3>(203): Please use [move] skill to navigate to <trunk>(303) location, then use [push] skill to transport it to the franka assembly area."
 
+CRITICAL PUSH PRIORITY: If any wheeled robot has status 'moved' but has not yet pushed its component, prioritize giving it a [push] instruction immediately. DO NOT let wheeled robots wait after moving - they should push components to franka area as soon as possible after reaching component locations. This is essential for task efficiency and assembly workflow.
+
+URGENT STATUS-BASED DECISION MAKING:
+- If mobile_car_1(201) status is 'moved' and last_action is 'move' -> IMMEDIATELY give [push] instruction to transport left wheel to franka area
+- If mobile_car_2(202) status is 'moved' and last_action is 'move' -> IMMEDIATELY give [push] instruction to transport right wheel to franka area  
+- If mobile_car_3(203) status is 'moved' and last_action is 'move' -> IMMEDIATELY give [push] instruction to transport trunk to franka area
+- If any wheeled robot has both [push] and [wait] available actions but no [move], it means it's positioned and ready - give [push] instruction NOW
+
+PUSH EFFICIENCY RULES:
+1. NEVER give [wait] instruction to a wheeled robot that has just completed [move] action
+2. ALWAYS prioritize [push] over [wait] for wheeled robots that are positioned at component locations
+3. If a wheeled robot shows 'moved' status, its next action MUST be [push] - no exceptions
+4. Wheeled robots should push components immediately after reaching them - this is the core of the assembly workflow
+
+CRITICAL STATUS INTERPRETATION:
+- When mobile_car_1(201) status is 'moved' and last_action is 'move' -> It has reached the left wheel location and MUST use [push] to transport it to franka area
+- When mobile_car_2(202) status is 'moved' and last_action is 'move' -> It has reached the right wheel location and MUST use [push] to transport it to franka area  
+- When mobile_car_3(203) status is 'moved' and last_action is 'move' -> It has reached the trunk location and MUST use [push] to transport it to franka area
+- The [push] action is ALWAYS available for wheeled robots that have completed [move] - do not say "cannot execute"
+- If a wheeled robot's available actions show [push] and [wait], and its status is 'moved', choose [push] immediately
+
 CRITICAL: Your response MUST start with "Hello <agent_name>(agent_id):" followed by the instruction. Do not start with explanatory text.
