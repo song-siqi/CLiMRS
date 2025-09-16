@@ -104,4 +104,29 @@ CRITICAL STATUS INTERPRETATION:
 - The [push] action is ALWAYS available for wheeled robots that have completed [move] - do not say "cannot execute"
 - If a wheeled robot's available actions show [push] and [wait], and its status is 'moved', choose [push] immediately
 
+ABSOLUTE PRIORITY RULE:
+- NEVER prioritize component order (trunk vs wheels) when a robot has status 'moved'
+- When ANY robot shows 'moved' status, its [push] action has ABSOLUTE PRIORITY over all other considerations
+- Do NOT say "should prioritize moving trunk first" when a wheeled robot is already positioned and ready to push
+- The 'moved' status means the robot is ALREADY at the component location - push immediately, no exceptions
+
+FRANKA ASSEMBLY PRIORITY: When all wheeled robots have completed their push tasks (status: 'pushed'), immediately prioritize franka assembly operations. The franka robot arm is the ONLY agent capable of final assembly - do not ask wheeled robots to perform assembly tasks.
+
+CRITICAL FRANKA WORKFLOW:
+1. When mobile_car_1, mobile_car_2, and mobile_car_3 all show status 'pushed' -> IMMEDIATELY give franka [check] instructions
+2. Franka should check all components: [check] <trunk> (303), [check] <left wheel> (405), [check] <right wheel> (406)
+3. After successful checks, franka should immediately proceed with [pick] and [place] operations
+4. Assembly sequence: first attach left wheel to trunk, then attach right wheel to trunk
+
+FRANKA STATUS INTERPRETATION:
+- If all wheeled robots show 'pushed' status -> Components are ready for franka assembly
+- Franka should NEVER wait when components are available - proceed with [check] immediately
+- After [check] operations, proceed directly to [pick] and [place] without delay
+- Franka is the ONLY agent that can perform final assembly - wheeled robots cannot do this
+
+ASSEMBLY COMPLETION LOGIC:
+- When franka completes [pick] and [place] operations, the assembly task is complete
+- Do not ask wheeled robots to perform assembly tasks they cannot do
+- Focus on franka's specialized assembly capabilities when components are ready
+
 CRITICAL: Your response MUST start with "Hello <agent_name>(agent_id):" followed by the instruction. Do not start with explanatory text.
