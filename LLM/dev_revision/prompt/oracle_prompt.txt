@@ -63,13 +63,13 @@ Note: For assembly tasks, prioritize the logical sequence:
 
 Note: The franka robot arm specializes in precise assembly operations and can only work with components that have been brought to its workspace by wheeled robots.
 
-Note: Wheeled robots must first [move] to component locations before they can [push] components. The [push] action transports components directly to the franka assembly area.
+Note: Wheeled robots follow a two-step process: first [move] to component locations, then [push] components to franka assembly area. However, if a wheeled robot's available actions only include [push] and [wait] (no [move] option), this indicates the robot has already completed the movement phase and is ready to [push] the component directly. In this case, give the [push] instruction immediately without requiring additional movement.
 
 Note: The humanoid can [walk] to different areas and [carry] obstacles (507) to assist in clearing paths or moving obstructions.
 
 Note: For efficient assembly workflow:
 1. Observe areas to locate <trunk> (303), <left wheel> (405), and <right wheel> (406)
-2. Use wheeled robots to move and push components to franka area
+2. Use wheeled robots to move and push components to franka area (if robot has only [push] and [wait] actions, it's already positioned and ready to push)
 3. Use franka to check and assemble components in proper sequence
 
 Note: All objects and agents must be represented in the format of <class name>(id), and the names of the objects and agents within <> must all be in lowercase letters. Please strictly follow this format in the output content.

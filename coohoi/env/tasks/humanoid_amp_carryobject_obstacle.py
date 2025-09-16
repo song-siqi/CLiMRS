@@ -75,7 +75,6 @@ class LLMManager:
         self.arena_multi_agent = None
         self.llm_planning_integration = None
         self.llm_integration = None
-        
         if self.enable_llm:
             self._init_llm_systems()
     
@@ -111,8 +110,10 @@ class LLMManager:
         args.select_agents = False
         
         def env_fn():
+            task_ref = self.task  # 捕获真实任务的引用（LLMManager.task）  
             class MockEnv:
                 def __init__(self):
+                    self.task = task_ref  
                     self.task_goal = {"on_trunk(303)_left wheel(405)": [1], "on_trunk(303)_right wheel(406)": [1]}
                     self.goal_instruction = "Assemble robot components: attach left and right wheels to trunk"
                     self.steps = 0
@@ -165,7 +166,10 @@ class LLMManager:
                             ]
                         elif i == 2:  # mobile_car_1 agent (left wheel)
                             agent_key = "mobile_car_1(201)"
-                            agent_state = self.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
+                            if hasattr(self, 'task') and hasattr(self.task, 'agent_states'):
+                                agent_state = self.task.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
+                            else:
+                                agent_state = self.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
                             
                             available_actions = []
                             if agent_state['status'] == 'idle':
@@ -176,7 +180,10 @@ class LLMManager:
                             available_actions.append("[wait] <mobile_car_1> (201) wait")
                         elif i == 3:  # mobile_car_2 agent (right wheel)
                             agent_key = "mobile_car_2(202)"
-                            agent_state = self.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
+                            if hasattr(self, 'task') and hasattr(self.task, 'agent_states'):
+                                agent_state = self.task.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
+                            else:
+                                agent_state = self.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
                             
                             available_actions = []
                             if agent_state['status'] == 'idle':
@@ -187,7 +194,10 @@ class LLMManager:
                             available_actions.append("[wait] <mobile_car_2> (202) wait")
                         elif i == 4:  # mobile_car_3 agent (trunk)
                             agent_key = "mobile_car_3(203)"
-                            agent_state = self.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
+                            if hasattr(self, 'task') and hasattr(self.task, 'agent_states'):
+                                agent_state = self.task.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
+                            else:
+                                agent_state = self.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
                             
                             available_actions = []
                             if agent_state['status'] == 'idle':
@@ -237,12 +247,23 @@ class LLMManager:
                     if agent_key not in self.agent_states:
                         self.agent_states[agent_key] = {'status': 'idle', 'last_action': None}
                     
-                    if "[move]" in action:
-                        self.agent_states[agent_key] = {'status': 'moved', 'last_action': 'move'}
-                    elif "[push]" in action:
-                        self.agent_states[agent_key] = {'status': 'pushed', 'last_action': 'push'}
-                    elif "[observe]" in action:
-                        self.agent_states[agent_key] = {'status': 'observed', 'last_action': 'observe'}
+                    if hasattr(self, 'task') and hasattr(self.task, 'agent_states'):
+                        if "[move]" in action:
+                            self.task.agent_states[agent_key] = {'status': 'moved', 'last_action': 'move'}
+                            self.agent_states[agent_key] = {'status': 'moved', 'last_action': 'move'}
+                        elif "[push]" in action:
+                            self.task.agent_states[agent_key] = {'status': 'pushed', 'last_action': 'push'}
+                            self.agent_states[agent_key] = {'status': 'pushed', 'last_action': 'push'}
+                        elif "[observe]" in action:
+                            self.task.agent_states[agent_key] = {'status': 'observed', 'last_action': 'observe'}
+                            self.agent_states[agent_key] = {'status': 'observed', 'last_action': 'observe'}
+                    else:                       
+                        if "[move]" in action:
+                            self.agent_states[agent_key] = {'status': 'moved', 'last_action': 'move'}
+                        elif "[push]" in action:
+                            self.agent_states[agent_key] = {'status': 'pushed', 'last_action': 'push'}
+                        elif "[observe]" in action:
+                            self.agent_states[agent_key] = {'status': 'observed', 'last_action': 'observe'}
 
                     task_results = []
                     satisfied = []
@@ -293,9 +314,6 @@ class LLMManager:
             env = MockEnv()
             env.envs = [None]
             env.get_positions_for_prompt = self.task.get_positions_for_prompt
-            
-
-            env.task = self.task
             
             return env
         
@@ -371,7 +389,8 @@ class LLMManager:
 
     def _any_robot_executing_waypoints(self):
         task = self.task
-        if hasattr(task, 'llm_action_type') and task.llm_action_type == "move" and hasattr(task, 'current_robot_id'):
+        # 检查move或push动作是否在执行
+        if hasattr(task, 'llm_action_type') and task.llm_action_type in ["move", "push"] and hasattr(task, 'current_robot_id'):
             robot_id = task.current_robot_id
             simple_robot_id = robot_id - 200 if robot_id > 200 else robot_id
             
@@ -389,6 +408,10 @@ class LLMManager:
 
             if waypoints is not None and len(waypoints) > 0 and current_idx < len(waypoints):
                 return True
+        
+        # 检查是否有push模式激活
+        if hasattr(task, '_llm_push_mode') and getattr(task, '_llm_push_mode', False):
+            return True
                 
         return False
     
@@ -502,6 +525,13 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         # 初始化对话历史用于LLM状态上下文
         self.dialogue_history = ""
         self.total_dialogue_history = []
+        
+        # 添加agent状态管理 - 跟踪每个mobile car的状态
+        self.agent_states = {
+            'mobile_car_1(201)': {'status': 'idle', 'last_action': None},
+            'mobile_car_2(202)': {'status': 'idle', 'last_action': None}, 
+            'mobile_car_3(203)': {'status': 'idle', 'last_action': None}
+        }
         
         # 初始化robot相关属性
         self.current_robot_name = None
@@ -2024,6 +2054,20 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self.keep_cube_attached_to_box_1()
             self.keep_cube_attached_to_box_3()
             self.current_wp_idx += 1
+            # 检查是否完成了所有waypoints
+            if self.current_wp_idx >= len(self.waypoints):
+                if hasattr(self, 'agent_states') and 'mobile_car_1(201)' in self.agent_states:
+                    # 如果是push模式，完成后重置push状态
+                    if getattr(self, '_llm_push_mode', False):
+                        self.agent_states['mobile_car_1(201)'] = {'status': 'pushed', 'last_action': 'push'}
+                        print(f"✅ Robot 1 完成push waypoints，推动完成")
+                        if hasattr(self, 'current_robot_id') and (self.current_robot_id == 201 or self.current_robot_id == 1):
+                            self._llm_push_mode = False
+                            self.llm_action_type = None
+                            print(f"🔄 Robot 1 push完成，重置LLM状态")
+                    else:
+                        self.agent_states['mobile_car_1(201)'] = {'status': 'moved', 'last_action': 'move'}
+                        print(f"✅ Robot 1 完成所有RRT waypoints，状态更新为'moved'，push动作已可用")
             if self.current_wp_idx == 1:
                 self._reset_target2([0])
 
@@ -2060,6 +2104,20 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
 
         if robot_to_waypoint_dist < 0.05:
             self.current_wp_idx_2 += 1
+            # 检查是否完成了所有waypoints
+            if self.current_wp_idx_2 >= len(self.waypoints_2):
+                if hasattr(self, 'agent_states') and 'mobile_car_2(202)' in self.agent_states:
+                    # 如果是push模式，完成后重置push状态
+                    if getattr(self, '_llm_push_mode', False):
+                        self.agent_states['mobile_car_2(202)'] = {'status': 'pushed', 'last_action': 'push'}
+                        print(f"✅ Robot 2 完成push waypoints，推动完成")
+                        if hasattr(self, 'current_robot_id') and (self.current_robot_id == 202 or self.current_robot_id == 2):
+                            self._llm_push_mode = False
+                            self.llm_action_type = None
+                            print(f"🔄 Robot 2 push完成，重置LLM状态")
+                    else:
+                        self.agent_states['mobile_car_2(202)'] = {'status': 'moved', 'last_action': 'move'}
+                        print(f"✅ Robot 2 完成所有RRT waypoints，状态更新为'moved'，push动作已可用")
 
     def _update_robot_3(self, mobile_robot_3_state_tensor, component_body_state_tensor,
                     all_root_state, step_size):
@@ -2096,6 +2154,19 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         if robot_to_waypoint_dist < 0.05:
             self.keep_cube_attached_to_box_3()
             self.current_wp_idx_3 += 1
+            if self.current_wp_idx_3 >= len(self.waypoints_3):
+                if hasattr(self, 'agent_states') and 'mobile_car_3(203)' in self.agent_states:
+                    # 如果是push模式，完成后重置push状态
+                    if getattr(self, '_llm_push_mode', False):
+                        self.agent_states['mobile_car_3(203)'] = {'status': 'pushed', 'last_action': 'push'}
+                        print(f"✅ Robot 3 完成push waypoints，推动完成")
+                        if hasattr(self, 'current_robot_id') and (self.current_robot_id == 203 or self.current_robot_id == 3):
+                            self._llm_push_mode = False
+                            self.llm_action_type = None
+                            print(f"🔄 Robot 3 push完成，重置LLM状态")
+                    else:
+                        self.agent_states['mobile_car_3(203)'] = {'status': 'moved', 'last_action': 'move'}
+                        print(f"✅ Robot 3 完成所有RRT waypoints，状态更新为'moved'，push动作已可用")
 
     def _push_nearest_box(self, robot_state, component_states, component_idxs, direction, step_size, all_root_state):
         box_pos = torch.stack([cs[0:2] for cs in component_states], dim=0)
@@ -2283,14 +2354,17 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             waypoints = getattr(self, 'waypoints', None)
             wp_idx = getattr(self, 'current_wp_idx', 0)
             handle = self.mobile_handles[0]
+            agent_key = 'mobile_car_1(201)'
         elif robot_id == 2:
             waypoints = getattr(self, 'waypoints_2', None)
             wp_idx = getattr(self, 'current_wp_idx_2', 0)
             handle = self.mobile_handles[1]
+            agent_key = 'mobile_car_2(202)'
         elif robot_id == 3:
             waypoints = getattr(self, 'waypoints_3', None)
             wp_idx = getattr(self, 'current_wp_idx_3', 0)
             handle = self.mobile_handles[2]
+            agent_key = 'mobile_car_3(203)'
         else:
             print(f"⚠️ 未知robot_id: {robot_id}")
             return
@@ -2302,6 +2376,16 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         
         if len(waypoints) == 0:
             print(f"⚠️ Robot {robot_id} waypoints为空")
+            return
+            
+        # 检查移动是否已经完成
+        if wp_idx >= len(waypoints):
+            # 移动已完成，确保状态为'moved'
+            if hasattr(self, 'agent_states') and agent_key in self.agent_states:
+                current_status = self.agent_states[agent_key].get('status', 'idle')
+                if current_status != 'moved':
+                    self.agent_states[agent_key] = {'status': 'moved', 'last_action': 'move'}
+                    print(f"✅ Robot {robot_id} 移动完成，状态更新为'moved'，push动作已可用")
             return
 
         env_ptr = self.envs[0]
@@ -2355,46 +2439,27 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self._assign_waypoints_by_area("mobile_car_3", area)
         
     def push_box_with_robot(self, robot_id):
+        self._generate_push_waypoints_for_robot(robot_id)
+        
         if robot_id == 1:
-            handle = self.mobile_handles[0]
-            box_handle = self.component_cube_handles[0]
+            self.current_wp_idx = 0
+            agent_key = 'mobile_car_1(201)'
         elif robot_id == 2:
-            handle = self.mobile_handles[1]
-            box_handle = self.component_cube_handles[1]
+            self.current_wp_idx_2 = 0
+            agent_key = 'mobile_car_2(202)'
         elif robot_id == 3:
-            handle = self.mobile_handles[2]
-            box_handle = self.component_cube_handles[2]
+            self.current_wp_idx_3 = 0
+            agent_key = 'mobile_car_3(203)'
         else:
             print(f"⚠️ 未知robot_id: {robot_id}")
             return
-
-        env_ptr = self.envs[0]
-        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        all_root_state = gymtorch.wrap_tensor(root_state)
-        idx = self.gym.get_actor_index(env_ptr, handle, gymapi.DOMAIN_SIM)
-        box_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
-        robot_state = all_root_state[idx]
-        box_state = all_root_state[box_idx]
-
-        pos = robot_state[0:2].cpu().numpy()
-        box_pos = box_state[0:2].cpu().numpy()
-        
-        direction = box_pos - pos
-        norm = np.linalg.norm(direction)
-        if norm > 1e-3:
-            direction = direction / norm
-            step = 0.05
-            # 小车和箱子一起移动
-            new_pos = pos + direction * step
-            new_box_pos = box_pos + direction * step
             
-            # 确保tensor在正确的设备上
-            robot_state[0:2] = torch.tensor(new_pos, device=robot_state.device, dtype=robot_state.dtype)
-            box_state[0:2] = torch.tensor(new_box_pos, device=box_state.device, dtype=box_state.dtype)
+        # 开始push时更新状态
+        if hasattr(self, 'agent_states') and agent_key in self.agent_states:
+            self.agent_states[agent_key] = {'status': 'pushing', 'last_action': 'push'}
+            print(f"🚀 Robot {robot_id} 开始推动，状态更新为'pushing'")
             
-            all_root_state[idx] = robot_state
-            all_root_state[box_idx] = box_state
-            self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(all_root_state))
+        return True
             
     def execute_robot_action(self, robot_id, action_type):
         if action_type == "move":
@@ -2464,6 +2529,11 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         if action_type == "move":
             if "mobile_car" in robot_name:
                 simple_robot_id = robot_id - 200 if robot_id > 200 else robot_id
+                # 开始移动时更新状态
+                agent_key = f'mobile_car_{simple_robot_id}({robot_id})'
+                if hasattr(self, 'agent_states') and agent_key in self.agent_states:
+                    self.agent_states[agent_key] = {'status': 'moving', 'last_action': 'move'}
+                    print(f"🚶 {robot_name} 开始移动，状态更新为'moving'")
                 self.execute_robot_action(simple_robot_id, "move")
             else:
                 area = self._get_target_area(target_name)
@@ -2471,6 +2541,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 
         elif action_type == "push":
             self._llm_push_mode = True
+            self.llm_action_type = "push"  # 设置push动作类型，类似move的逻辑
             if "mobile_car" in robot_name:
                 simple_robot_id = robot_id - 200 if robot_id > 200 else robot_id
                 self.execute_robot_action(simple_robot_id, "push")
@@ -2956,22 +3027,38 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         all_root_state = gymtorch.wrap_tensor(root_state)
         
+        # 获取robot位置
         if robot_id == 1:
             robot_handle = self.mobile_handles[0]
-            box_handle = self.component_cube_handles[0]
         elif robot_id == 2:
             robot_handle = self.mobile_handles[1] 
-            box_handle = self.component_cube_handles[1]
         elif robot_id == 3:
             robot_handle = self.mobile_handles[2]
-            box_handle = self.component_cube_handles[2]
         else:
             return
             
         robot_idx = self.gym.get_actor_index(env_ptr, robot_handle, gymapi.DOMAIN_SIM)
-        box_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
         robot_pos = all_root_state[robot_idx, 0:2].cpu().numpy()
-        box_pos = all_root_state[box_idx, 0:2].cpu().numpy()
+        
+        # 获取所有箱子位置，选择最近的箱子（与_update_robot_X逻辑一致）
+        box_handles = [self.component_cube_handles[0], self.component_cube_handles[1], self.component_cube_handles[2]]
+        box_positions = []
+        for box_handle in box_handles:
+            box_idx = self.gym.get_actor_index(env_ptr, box_handle, gymapi.DOMAIN_SIM)
+            box_pos = all_root_state[box_idx, 0:2].cpu().numpy()
+            box_positions.append(box_pos)
+        
+        # 选择最近的箱子
+        distances = [((robot_pos[0] - bp[0])**2 + (robot_pos[1] - bp[1])**2)**0.5 for bp in box_positions]
+        nearest_idx = distances.index(min(distances))
+        box_pos = box_positions[nearest_idx]
+        
+        # 调试信息：显示Robot和所有箱子的位置
+        box_names = ["left_wheel", "right_wheel", "trunk"]
+        print(f"🤖 Robot {robot_id} 位置: ({robot_pos[0]:.1f}, {robot_pos[1]:.1f})")
+        for i, (bp, dist) in enumerate(zip(box_positions, distances)):
+            print(f"  📦 {box_names[i]} 位置: ({bp[0]:.1f}, {bp[1]:.1f}), 距离: {dist:.2f}")
+        print(f"  ✅ 选择最近的: {box_names[nearest_idx]} (距离: {distances[nearest_idx]:.2f})")
         
         # 根据box位置生成推箱子waypoints
         if box_pos[0] >= 0 and box_pos[1] >= 0:
@@ -2983,7 +3070,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         elif box_pos[0] < 0 and box_pos[1] >= 0:
             self._reset_car_target4([0], robot_id=robot_id)
             
-        print(f"🚀 Robot {robot_id} 生成推箱子waypoints，box位置: ({box_pos[0]:.1f}, {box_pos[1]:.1f})")
+        box_names = ["left_wheel", "right_wheel", "trunk"]
+        print(f"🚀 Robot {robot_id} 选择最近的箱子: {box_names[nearest_idx]}，位置: ({box_pos[0]:.1f}, {box_pos[1]:.1f})")
 
     def _update_specific_robot(self, robot_id):
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
@@ -3040,10 +3128,15 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 robot_full_id = self.current_robot_id
                 simple_robot_id = robot_full_id - 200 if robot_full_id > 200 else robot_full_id
                 self._update_specific_robot(simple_robot_id)
-                return  
+                return
         
-        # LLM模式下不执行通用waypoints逻辑，避免同时移动所有机器人
-        print("⚠️ LLM模式激活，但没有指定机器人ID，跳过通用更新")
+        # 持续执行push动作 - 只push LLM指定的robot
+        if hasattr(self, 'llm_action_type') and self.llm_action_type == "push":
+            if hasattr(self, 'current_robot_id'):
+                robot_full_id = self.current_robot_id
+                simple_robot_id = robot_full_id - 200 if robot_full_id > 200 else robot_full_id
+                self._update_specific_robot(simple_robot_id)
+                return  
 
     def _get_current_executing_skill(self):
         try:
@@ -3144,7 +3237,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self.keep_cube_attached_to_box_3()
         
         if not getattr(self.llm_manager, 'llm_mode_active', False):
-            # 非LLM模式：执行原有的Franka逻辑
             if self.wait_counter < self.wait_steps:
                 self.wait_counter += 1
             else:
@@ -3161,18 +3253,13 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 else:
                     self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
         else:
-            # LLM模式：如果在等待规划，Franka保持静止；如果在执行规划，按LLM指令行动
             if getattr(self, '_llm_waiting_for_plan', True):
-                # 等待LLM规划时，Franka保持当前姿态
                 self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
             else:
-                # LLM规划完成，执行LLM指令
                 if hasattr(self, 'current_target_id') and self.current_target_id is not None:
-                    # 根据target_id调用相应的处理函数
                     if self.current_target_id in self.target_id_handlers:
                         self.target_id_handlers[self.current_target_id]()
                     else:
-                        print(f"⚠️ 未找到target_id={self.current_target_id}的处理函数")
                         self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
                 else:
                     # 没有target_id时，执行原有的逻辑
@@ -3192,7 +3279,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                         else:
                             self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
         
-        # 关键修复：调用LLM模式的移动机器人逻辑
         if getattr(self.llm_manager, 'llm_mode_active', False):
             self._update_mobile_robots_llm_mode()
         
@@ -3308,7 +3394,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         if getattr(self.llm_manager, 'llm_mode_active', False):
             self._update_mobile_robots_llm_mode()
         else:
-            # 非LLM模式：执行原有逻辑
             self._update_mobile_robots()
         obstacle_reward_w = 0.1
         walk_pos_reward_w = 0.1
