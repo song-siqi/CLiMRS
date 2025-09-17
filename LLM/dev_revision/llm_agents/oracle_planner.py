@@ -140,6 +140,11 @@ class OraclePlanner(object):
 
         self.generator = lm_engine(self.source, self.lm_id, self.device)
 
+        if not hasattr(self, 'agent_grouping_prompt_path'):
+            self.agent_grouping_prompt_path = 'LLM/dev_revision/prompt/agent_grouping_prompt.txt'
+        if not hasattr(self, 'agent_grouping_vanilla_prompt_path'):
+            self.agent_grouping_vanilla_prompt_path = 'LLM/dev_revision/prompt/agent_grouping_vanilla_prompt.txt'
+
     def agent_grouping(self, observations, task_goal, dialogue_history):
         """
         Perform agent grouping for multi-agent coordination using the two-stage process:
