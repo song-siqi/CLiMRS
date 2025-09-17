@@ -473,30 +473,25 @@ class LLMManager:
                             'dialogue_history': getattr(self.task, 'total_dialogue_history', [])
                         }
                         
-                        # 使用dev_revision的grouping机制，融合siqi的思想
                         print("🔍 Applying agent grouping with siqi's approach")
                         try:
-                            # 准备grouping参数
                             observations = str(obs)
                             task_goal = self.arena_multi_agent.env.goal_instruction or "Assemble the car components"
                             dialogue_history = "\n".join(getattr(self.task, 'total_dialogue_history', []))
-                            
-                            # 调用dev_revision版本的agent_grouping方法
+
                             grouping_result = self.arena_multi_agent.oracle_planner.agent_grouping(
                                 observations=observations,
                                 task_goal=task_goal,
                                 dialogue_history=dialogue_history
                             )
                             
-                            # dev_revision版本返回字典格式
                             if grouping_result and grouping_result.get('success', False):
                                 vanilla_strategy = grouping_result['vanilla_strategy']
                                 structured_groups = grouping_result['structured_groups']
                                 print("✅ Agent grouping successful!")
                                 print(f"📋 Vanilla Strategy:\n{vanilla_strategy}")
                                 print(f"📋 Structured Groups:\n{structured_groups}")
-                                
-                                # 存储当前grouping策略
+
                                 self.task.current_grouping_strategy = structured_groups
                                 self._apply_grouping_strategy(structured_groups)
                             else:
