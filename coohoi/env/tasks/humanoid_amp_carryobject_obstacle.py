@@ -471,17 +471,49 @@ class LLMManager:
                             'dialogue_history': getattr(self.task, 'total_dialogue_history', [])
                         }
                         
-                        # 使用简化的grouping逻辑
-                        print("🔍 Applying simplified agent grouping")
+                        # 使用真正的siqi grouping机制
+                        print("🔍 Applying real agent grouping from siqi")
                         try:
-                            # 模拟grouping结果
-                            simplified_groups = self._generate_simple_grouping()
-                            print(f"📋 Agent Groups Generated:\n{simplified_groups}")
-                            # 存储当前grouping策略
-                            self.task.current_grouping_strategy = simplified_groups
-                            self._apply_grouping_strategy(simplified_groups)
-                        except Exception as simple_error:
-                            print(f"Simple grouping failed: {simple_error}")
+                            # 准备grouping参数
+                            observations = str(obs)
+                            task_goal = self.arena_multi_agent.env.goal_instruction or "Assemble the car components"
+                            dialogue_history = "\n".join(getattr(self.task, 'total_dialogue_history', []))
+                            
+                            # 调用oracle planner的agent_grouping方法
+                            grouping_result = self.arena_multi_agent.oracle_planner.agent_grouping(
+                                observations=observations,
+                                task_goal=task_goal,
+                                dialogue_history=dialogue_history
+                            )
+                            
+                            if grouping_result and grouping_result.get('success', False):
+                                print("✅ Real agent grouping successful!")
+                                print(f"📋 Vanilla Strategy:\n{grouping_result['vanilla_strategy']}")
+                                print(f"📋 Structured Groups:\n{grouping_result['structured_groups']}")
+                                
+                                # 存储当前grouping策略
+                                self.task.current_grouping_strategy = grouping_result['structured_groups']
+                                self._apply_grouping_strategy(grouping_result['structured_groups'])
+                            else:
+                                print("❌ Real grouping failed, falling back to simplified grouping")
+                                simplified_groups = self._generate_simple_grouping()
+                                print(f"📋 Agent Groups Generated:\n{simplified_groups}")
+                                self.task.current_grouping_strategy = simplified_groups
+                                self._apply_grouping_strategy(simplified_groups)
+                                
+                        except Exception as real_grouping_error:
+                            print(f"Real grouping failed: {real_grouping_error}")
+                            import traceback
+                            traceback.print_exc()
+                            # 回退到简化的grouping
+                            print("🔄 Falling back to simplified grouping")
+                            try:
+                                simplified_groups = self._generate_simple_grouping()
+                                print(f"📋 Agent Groups Generated:\n{simplified_groups}")
+                                self.task.current_grouping_strategy = simplified_groups
+                                self._apply_grouping_strategy(simplified_groups)
+                            except Exception as simple_error:
+                                print(f"Simplified grouping also failed: {simple_error}")
                     except Exception as grouping_error:
                         print(f"Agent grouping failed: {grouping_error}")
                 
@@ -517,7 +549,6 @@ Group 2: <mobile_car_3>(203) - Sub-goal: Transport trunk to franka assembly area
 Group 3: <franka>(606) - Sub-goal: Prepare for assembly operations
 Non-assigned Agent: <humanoid>(101) - Reason: No obstacles detected"""
         else:
-            # 后期：执行装配操作
             return """Group 1: <franka>(606) - Sub-goal: Assemble left wheel and right wheel onto trunk
 Group 2: <mobile_car_1>(201), <mobile_car_2>(202), <mobile_car_3>(203) - Sub-goal: Return to standby positions
 Non-assigned Agent: <humanoid>(101) - Reason: Assembly phase, no movement needed"""
