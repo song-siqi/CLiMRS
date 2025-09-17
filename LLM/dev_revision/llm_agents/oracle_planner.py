@@ -24,6 +24,8 @@ class OraclePlanner(object):
             run_predefined_actions=False,
             oracle_prompt_path=None,
             agent_selection_prompt_path=None,
+            agent_grouping_prompt_path=None,
+            agent_grouping_vanilla_prompt_path=None,
         ):
         self.env_fn = environment_fn
         self.agents = agent_fn
@@ -34,6 +36,8 @@ class OraclePlanner(object):
         # define some args for the oracle planner
         self.oracle_prompt_path = oracle_prompt_path
         self.agent_selection_prompt_path = agent_selection_prompt_path
+        self.agent_grouping_prompt_path = agent_grouping_prompt_path or 'LLM/dev_revision/prompt/agent_grouping_prompt.txt'
+        self.agent_grouping_vanilla_prompt_path = agent_grouping_vanilla_prompt_path or 'LLM/dev_revision/prompt/agent_grouping_vanilla_prompt.txt'
 
         # define parameters that were used but not initialized
         self.source = args.source
@@ -135,6 +139,76 @@ class OraclePlanner(object):
             return _generate
 
         self.generator = lm_engine(self.source, self.lm_id, self.device)
+
+    def agent_grouping(self, observations, task_goal, dialogue_history):
+        """
+        Perform agent grouping for multi-agent coordination using the two-stage process:
+        1. Vanilla Grouping: Generate comprehensive grouping strategy
+        2. Structured Extraction: Convert strategy to precise format
+        """
+        try:
+            # Prepare agent info
+            agents_info = []
+            for agent in self.agents:
+                agent_info = f"<{agent.agent_node['class_name']}>({agent.agent_node['id']})"
+                agents_info.append(agent_info)
+            agents_info_str = ", ".join(agents_info)
+
+            # Stage 1: Vanilla Grouping - Generate comprehensive strategy
+            with open(self.agent_grouping_vanilla_prompt_path, 'r', encoding='utf-8') as f:
+                vanilla_prompt = f.read()
+
+            vanilla_prompt = vanilla_prompt.replace('#AGENTS_INFO#', agents_info_str)
+            vanilla_prompt = vanilla_prompt.replace('#TASK_GOAL#', str(task_goal))
+            vanilla_prompt = vanilla_prompt.replace('#OBSERVATIONS#', str(observations))
+            vanilla_prompt = vanilla_prompt.replace('#DIALOGUE_HISTORY#', str(dialogue_history))
+
+            if self.debug:
+                print(f"Vanilla grouping prompt:\n{vanilla_prompt}")
+
+            vanilla_chat_prompt = [{"role": "user", "content": vanilla_prompt}]
+            vanilla_outputs, vanilla_usage = self.generator(vanilla_chat_prompt, self.sampling_params)
+            vanilla_grouping_output = vanilla_outputs[0]
+
+            if self.debug:
+                print(f"Vanilla grouping output:\n{vanilla_grouping_output}")
+
+            # Stage 2: Structured Extraction - Convert to precise format
+            with open(self.agent_grouping_prompt_path, 'r', encoding='utf-8') as f:
+                structured_prompt = f.read()
+
+            structured_prompt = structured_prompt.replace('#VANILLA_GROUPING_OUTPUT#', vanilla_grouping_output)
+            structured_prompt = structured_prompt.replace('#AGENTS_INFO#', agents_info_str)
+
+            if self.debug:
+                print(f"Structured grouping prompt:\n{structured_prompt}")
+
+            structured_chat_prompt = [{"role": "user", "content": structured_prompt}]
+            structured_outputs, structured_usage = self.generator(structured_chat_prompt, self.sampling_params)
+            structured_grouping_output = structured_outputs[0]
+
+            if self.debug:
+                print(f"Structured grouping output:\n{structured_grouping_output}")
+
+            total_usage = vanilla_usage + structured_usage
+            
+            return {
+                'vanilla_strategy': vanilla_grouping_output,
+                'structured_groups': structured_grouping_output,
+                'usage': total_usage,
+                'success': True
+            }
+
+        except Exception as e:
+            print(f"Agent grouping failed: {e}")
+            traceback.print_exc()
+            return {
+                'vanilla_strategy': None,
+                'structured_groups': None,
+                'usage': 0,
+                'success': False,
+                'error': str(e)
+            }
 
     def get_oracle_prompt(self, obs_text, goal_instruction, num_agents, dialogue_history):
         '''

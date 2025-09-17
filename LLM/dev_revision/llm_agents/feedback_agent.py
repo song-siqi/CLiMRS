@@ -155,19 +155,19 @@ class LLM:
 			on_same_surface_objects
 		):
 		"""
-		New skill-based action format:
+		Assembly task skill-based action format:
 		
 		'humanoid':
 		[walk] <humanoid> (101) move to selected area
 		[carry] <humanoid> (101) carry <obstacles> (507)
 		[wait] <humanoid> (101) wait
 
-		'wheeled robot':
-		[move] <wheeled robot1/2/3> (202/203/204) move to component location using RRT path
-		[push] <wheeled robot1/2/3> (202/203/204) push selected component to franka area
-		[wait] <wheeled robot1/2/3> (202/203/204) wait
+		'mobile_car' (wheeled robots):
+		[move] <mobile_car_1/2/3> (201/202/203) move to component location using RRT path
+		[push] <mobile_car_1/2/3> (201/202/203) push selected component to franka area
+		[wait] <mobile_car_1/2/3> (201/202/203) wait
 
-		'franka':
+		'robot_arm'/'franka':
 		[check] <franka> (606) check <trunk/left wheel/right wheel> (303/405/406)
 		[pick] <franka> (606) pick and place <wheel> on <trunk>
 		[wait] <franka> (606) wait
@@ -211,11 +211,15 @@ class LLM:
 			# Always add wait skill
 			available_plans.append(f"[wait] <humanoid> (101) wait")
 
-		elif agent_node["class_name"] in ["robot dog", "robot_dog", "mobile_car", "wheeled robot", "wheeled robot1", "wheeled robot2", "wheeled robot3"]:
-			# New skill-based format for wheeled robots
-			agent_id = str(agent_node.get('id', 202))  # Default to 202 if no ID, ensure string
-			robot_name = "mobile_car"
-			robot_id = "202"
+		elif agent_node["class_name"] in ["robot dog", "robot_dog", "mobile_car", "mobile_car_1", "mobile_car_2", "mobile_car_3"]:
+			# Assembly task specific mobile car logic
+			agent_id = agent_node.get('id', 201)
+			robot_name = agent_node["class_name"]
+			robot_id = str(agent_id)
+			
+			# Map mobile car to specific component
+			component_map = {201: "left wheel", 202: "right wheel", 203: "trunk"}
+			target_component = component_map.get(agent_id, "component")
 			
 			# Add move skills to component locations
 			if len(unreached_objecs) != 0:

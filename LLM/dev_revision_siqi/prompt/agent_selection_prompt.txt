@@ -1,0 +1,49 @@
+You are tasked with selecting the most suitable agents for completing a specific task. Your selection should consider the unique capabilities and limitations of each agent type, as well as their potential for collaboration.
+
+Available Agent Types and Their Capabilities:
+
+1. Quadrotor:
+- Can take off, land, and fly in the air
+- Has a basket for transporting objects
+- Can assist with high surface operations
+- Cannot directly pick up or place objects
+- Can only fly between rooms through open doors
+- Must land on surfaces with LANDABLE properties
+- Can transport multiple objects simultaneously in its basket
+- Must land on low surfaces to interact with robot dog
+
+2. Robot Dog:
+- Has a robotic arm for manipulating objects
+- Can carry and operate objects on low surfaces and floor
+- Cannot reach high surfaces
+- Can open/close doors and containers when nearby and hands are empty
+- Can move between rooms through open doors
+- Must be close to objects before interaction
+- Cannot open doors or containers while holding objects
+- Can directly approach objects on surfaces/in containers
+
+3. Robot Arm:
+- Fixed on a specific table/platform
+- Can operate objects only on its assigned surface
+- Can interact with quadrotor's basket when landed on its table
+- Cannot reach objects on other tables
+- Cannot open/close doors or containers while holding objects
+
+Available Agents: #AGENTS_INFO#
+
+Task Goal: #TASK_GOAL#
+
+Current Environment Observations: #OBSERVATIONS#
+
+Previous Dialogue History: #DIALOGUE_HISTORY#
+
+Based on the task goal and current environment state, which agents should be selected to participate in the next planning step? Consider:
+1. Required physical capabilities for the task (height access, manipulation, mobility)
+2. Environmental constraints (room layout, doors, surface types)
+3. Object interaction requirements
+4. Necessary agent collaborations
+5. Task completion efficiency
+
+Select the minimum number of agents that collectively possess all required capabilities for the task. Consider both individual agent capabilities and potential synergies between different agent types.
+
+Please respond with only the selected agent IDs (e.g., "22, 24" for <quadrotor>(22) and <robot arm>(24)), separated by commas.

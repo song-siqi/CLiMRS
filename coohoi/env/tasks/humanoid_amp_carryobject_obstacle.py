@@ -101,6 +101,8 @@ class LLMManager:
         args.encoding = 'utf-8'
         args.oracle_prompt_path = 'LLM/dev_revision/prompt/oracle_prompt.txt'
         args.agent_selection_prompt_path = 'LLM/dev_revision/prompt/agent_selection_prompt.txt'
+        args.agent_grouping_prompt_path = 'LLM/dev_revision/prompt/agent_grouping_prompt.txt'
+        args.agent_grouping_vanilla_prompt_path = 'LLM/dev_revision/prompt/agent_grouping_vanilla_prompt.txt'
         args.quadrotor_prompt_path = 'LLM/dev_revision/prompt/quadrotor_prompt.txt'
         args.mobile_car_prompt_path = 'LLM/dev_revision/prompt/mobile_car_prompt.txt'
         args.humanoid_prompt_path = 'LLM/dev_revision/prompt/humanoid_prompt.txt'
@@ -438,6 +440,31 @@ class LLMManager:
             try:
                 self.arena_multi_agent.dialogue_history = getattr(self.task, 'dialogue_history', "")
                 self.arena_multi_agent.total_dialogue_history = getattr(self.task, 'total_dialogue_history', [])
+                
+                # Optional: Use agent grouping for complex multi-agent coordination
+                # You can enable this by setting use_agent_grouping=True
+                if getattr(self.task, 'use_agent_grouping', False) and step_count % 5 == 0:  # Every 5 steps
+                    try:
+                        area_positions, agent_positions = self.task.get_positions_for_prompt(0, None)
+                        obs = {
+                            'area_positions': area_positions,
+                            'agent_positions': agent_positions,
+                            'agent_states': getattr(self.task, 'agent_states', {}),
+                            'dialogue_history': getattr(self.task, 'total_dialogue_history', [])
+                        }
+                        
+                        grouping_result = self.arena_multi_agent.perform_agent_grouping(
+                            observations=obs,
+                            task_goal="Complete robot assembly by coordinating humanoid, mobile cars, and franka arm",
+                            dialogue_history=str(getattr(self.task, 'total_dialogue_history', []))
+                        )
+                        
+                        if grouping_result and grouping_result['success']:
+                            print(f"📋 Agent Groups Generated:\n{grouping_result['structured_groups']}")
+                            print(f"💡 Grouping Strategy:\n{grouping_result['vanilla_strategy'][:500]}...")  # First 500 chars
+                            # The grouping results can be used to coordinate agents more effectively
+                    except Exception as grouping_error:
+                        print(f"Agent grouping failed: {grouping_error}")
                 
                 done, task_results, satisfied, unsatisfied, agent_id, agent_action, agent_message, steps = self.arena_multi_agent.step()
                 

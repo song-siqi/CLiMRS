@@ -87,7 +87,39 @@ class ArenaMultiAgent(object):
             run_predefined_actions=self.run_predefined_actions,
             oracle_prompt_path=self.oracle_prompt_path,
             agent_selection_prompt_path=self.agent_selection_prompt_path,
+            agent_grouping_prompt_path=getattr(args, 'agent_grouping_prompt_path', 'LLM/dev_revision/prompt/agent_grouping_prompt.txt'),
+            agent_grouping_vanilla_prompt_path=getattr(args, 'agent_grouping_vanilla_prompt_path', 'LLM/dev_revision/prompt/agent_grouping_vanilla_prompt.txt'),
         )
+
+    def perform_agent_grouping(self, observations, task_goal, dialogue_history):
+        """
+        Perform agent grouping using the oracle planner's grouping functionality.
+        This integrates the Vanilla Grouping and Structured Extraction process.
+        """
+        try:
+            grouping_result = self.oracle_planner.agent_grouping(
+                observations=observations,
+                task_goal=task_goal,
+                dialogue_history=dialogue_history
+            )
+            
+            if grouping_result['success']:
+                print(f"✅ Agent grouping successful!")
+                if self.debug:
+                    print(f"Vanilla Strategy:\n{grouping_result['vanilla_strategy']}")
+                    print(f"Structured Groups:\n{grouping_result['structured_groups']}")
+                    
+                self.total_cost += grouping_result['usage']
+                return grouping_result
+            else:
+                print(f"❌ Agent grouping failed: {grouping_result.get('error', 'Unknown error')}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Agent grouping exception: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def get_actions_feedback(self, obs, chat_agent_info):
 
