@@ -205,8 +205,7 @@ class LLMManager:
                                 # 如果正在移动，也允许推动作为备选
                                 available_actions.append("[push] <mobile_car_1> (201) push assigned component to franka area")
                             elif agent_state['status'] == 'pushed':
-                                # 如果已经推送，允许等待或移动到下一个目标
-                                available_actions.append("[move] <mobile_car_1> (201) move to assigned component location using RRT path")
+                               pass  
                             
                             available_actions.append("[wait] <mobile_car_1> (201) wait")
                         elif i == 3:  # mobile_car_2 agent (right wheel)
@@ -233,7 +232,7 @@ class LLMManager:
                             elif agent_state['status'] == 'moving':
                                 available_actions.append("[push] <mobile_car_2> (202) push assigned component to franka area")
                             elif agent_state['status'] == 'pushed':
-                                available_actions.append("[move] <mobile_car_2> (202) move to assigned component location using RRT path")
+                                pass  
                             
                             available_actions.append("[wait] <mobile_car_2> (202) wait")
                         elif i == 4:  # mobile_car_3 agent (trunk)
@@ -260,7 +259,7 @@ class LLMManager:
                             elif agent_state['status'] == 'moving':
                                 available_actions.append("[push] <mobile_car_3> (203) push assigned component to franka area")
                             elif agent_state['status'] == 'pushed':
-                                available_actions.append("[move] <mobile_car_3> (203) move to assigned component location using RRT path")
+                                pass  
                             
                             available_actions.append("[wait] <mobile_car_3> (203) wait")
                         else:
@@ -629,6 +628,12 @@ Non-assigned Agent: <humanoid>(101) - Reason: Assembly phase, no movement needed
 
             if waypoints is not None and len(waypoints) > 0 and current_idx < len(waypoints):
                 return True
+ 
+        if hasattr(task, 'llm_action_type') and task.llm_action_type in ["check", "pick"]:
+            if task.llm_action_type in ["pick_completed"]:
+                return False  
+            else:
+                return True  
  
         if hasattr(task, '_llm_push_mode') and getattr(task, '_llm_push_mode', False):
             return True
@@ -1906,7 +1911,9 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         elif self.franka_task_stage == 10:
             finished = self._step_franka_path()
             if finished:
+                self.franka_task_stage = 0
                 self.franka_count = 1
+                self.llm_action_type = "pick_completed"  
                 if hasattr(self, 'franka_path') and self.franka_path:
                     pose = self.franka_path[-1]
                     self.path_follow(pose)               
@@ -2018,6 +2025,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             finished = self._step_franka_path()
             if finished:
                 self.franka_task_stage_1 = 0
+                self.llm_action_type = "pick_completed"  # 标记pick操作完成
                 import pdb; pdb.set_trace() 
 
 ## mobile robots ##
@@ -2879,6 +2887,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         
     def franka_check(self, robot_name, target_name):
         print(f"Franka {robot_name} checking {target_name}")
+        self.llm_action_type = "check"
         
         root = self.gym.acquire_actor_root_state_tensor(self.sim)
         root = gymtorch.wrap_tensor(root)
@@ -2941,6 +2950,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
 
     def franka_pick(self, robot_name, target_name):
         print(f"Franka {robot_name} starting pick operation for {target_name}")
+        self.llm_action_type = "pick"
         
         # 确定要操作的组件handle
         cube_handle = None
