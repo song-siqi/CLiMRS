@@ -39,6 +39,8 @@ General Rules:
 2. Please ensure that the length of your output does not exceed 512 tokens.
 3. You are planning for only this group of agents: #GROUP_INFO# 
 4. Do NOT plan with agents outside this group, even if you need them to help your group with the current step.
+5. IMPORTANT: Focus on the FIRST action that the agent can perform from their current available actions. For multi-step tasks like "move then push", first instruct the agent to complete the move action. The push action will become available after the move is completed.
+6. When an agent has only [move] and [wait] available, instruct them to use [move] first if the task requires transportation. The [push] action will become available after they reach the component location.
 
 Remember: Do not let robot dogs reach things on high surfaces such as a high table or a dining table. A coffee table is not high surface.
 

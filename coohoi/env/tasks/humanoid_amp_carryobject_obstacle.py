@@ -2091,7 +2091,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         root_state = gymtorch.wrap_tensor(root_state)
         idx = self.gym.get_actor_index(env_ptr, handle, gymapi.DOMAIN_SIM)
-        root_state[idx, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=root_state.device, dtype=root_state.dtype)
+        root_state[idx, 3:7] = torch.tensor([0.7071, -0.7071, 0.0, 0.0], device=root_state.device, dtype=root_state.dtype)
+        # root_state[idx, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=root_state.device, dtype=root_state.dtype)
         self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))       
 
     def _build_mobile_robots(self, env_id, env_ptr):
@@ -2712,16 +2713,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
   
     def _execute_llm_action(self, agent_action, agent_message):
         try:
-            print(f"🤖 Executing LLM Action: {agent_action}")
-            
-            # 根据grouping策略调整执行优先级
-            if getattr(self, 'prioritize_movement', False):
-                print("🚚 Movement priority activated")
-            elif getattr(self, 'prioritize_assembly', False):
-                print("🔧 Assembly priority activated")  
-            elif getattr(self, 'prioritize_clearing', False):
-                print("🧹 Clearing priority activated")
-            
             robot_match = re.search(r'<([^>]+)>\s*\((\d+)\)', agent_action)
             action_type = None
             
@@ -2746,20 +2737,18 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 robot_name = robot_match.group(1)
                 robot_id = int(robot_match.group(2))
                 
-                # 对于check动作，需要从动作字符串中提取target
                 target_name = ""
                 if action_type == "check":
-                    # 检查动作格式：[check] <franka> (606) check <trunk> (303)
+                    # [check] <franka> (606) check <trunk> (303)
                     check_match = re.search(r'check\s+<([^>]+)>\s*\((\d+)\)', agent_action)
                     if check_match:
                         target_name = check_match.group(1)
                 elif action_type == "pick":
-                    # pick动作格式：[pick] <franka> (606) pick and place <left wheel> (405) on <trunk> (303)
+                    # [pick] <franka> (606) pick and place <left wheel> (405) on <trunk> (303)
                     pick_match = re.search(r'pick and place\s+<([^>]+)>\s*\((\d+)\)', agent_action)
                     if pick_match:
                         target_name = pick_match.group(1)
                 else:
-                    # 其他动作的target解析
                     target_match = re.search(r'<([^>]+)>\s*\((\d+)\)', agent_action.split('> (')[1] if '> (' in agent_action and agent_action.count('<') > 1 else '')
                     target_name = target_match.group(1) if target_match else ""
                 
@@ -2862,19 +2851,15 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         target_id = getattr(self, 'current_target_id', None)
         actual_robot_name = self._convert_llm_robot_name(robot_name, target_id)
         self._assign_waypoints_by_area(actual_robot_name, area_name)
-        
-        # 设置LLM动作完成状态
+
         self.llm_action_type = "walk_completed"
         return True
         
     def carry_obstacle(self, robot_name, target_name):
-        """搬运障碍物"""
         print(f"SUCCESS: {robot_name} carrying obstacle {target_name}")
         target_id = getattr(self, 'current_target_id', None)
         actual_robot_name = self._convert_llm_robot_name(robot_name, target_id)
-        # 这里可以添加具体的搬运逻辑
-        
-        # 设置LLM动作完成状态
+
         self.llm_action_type = "carry_completed"
         return True
         
@@ -2951,30 +2936,25 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
     def franka_pick(self, robot_name, target_name):
         print(f"Franka {robot_name} starting pick operation for {target_name}")
         self.llm_action_type = "pick"
-        
-        # 确定要操作的组件handle
         cube_handle = None
         if "left wheel" in target_name.lower():
             if hasattr(self, 'component_cube_handles') and len(self.component_cube_handles) > 0:
                 cube_handle = self.component_cube_handles[0]
-                self.franka_counter = 0  # 设置为处理left wheel
+                self.franka_counter = 0  # left wheel
         elif "right wheel" in target_name.lower():
             if hasattr(self, 'component_cube_handles') and len(self.component_cube_handles) > 1:
                 cube_handle = self.component_cube_handles[1]
-                self.franka_counter = 2  # 设置为处理right wheel
+                self.franka_counter = 2  # right wheel
         elif "trunk" in target_name.lower():
             if hasattr(self, 'component_cube_handles') and len(self.component_cube_handles) > 2:
                 cube_handle = self.component_cube_handles[2]
-                self.franka_counter = 4  # 设置为处理trunk
+                self.franka_counter = 4  # trunk
         
         if cube_handle is not None:
-            # 重置Franka状态机
             self.franka_task_stage = 0
             self.franka_count = 0
             self.absorbed = 0
             self.gripper_closed = False
-            
-            # 启动Franka状态机
             print(f"SUCCESS: Franka starting FSM for {target_name} with counter={self.franka_counter}")
             if "left wheel" in target_name.lower():
                 self._franka_take_and_place_fsm(cube_handle)
@@ -2987,7 +2967,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             print(f"ERROR: Cannot find component handle for {target_name}")
 
     def wait_agent(self, robot_name):
-        """等待智能体"""
         print(f"Agent {robot_name} waiting")
         
     def _get_component_area(self, component_name):
@@ -3464,18 +3443,14 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self._prev_root_pos[:] = self._humanoid_root_states[..., 0:3]
         self._prev_box_pos[:] = self._box_states[..., 0:3]
         
-        # LLM规划模式 - 从一开始就等待LLM规划
         if self.llm_manager.enable_llm:
-            # 初始化LLM等待状态
             if not hasattr(self, '_llm_mode_initialized'):
                 self._llm_mode_initialized = True
                 self.llm_manager.llm_mode_active = True
                 self._llm_waiting_for_plan = True
             
-            # 定期调用LLM更新
             self.llm_manager.update(int(self.progress_buf[0]))
-            
-            # 检查LLM规划状态
+
             plan_status = self.llm_manager.get_plan_status()
             if plan_status == "planning":
                 self.llm_manager.llm_mode_active = True
@@ -3531,18 +3506,15 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         ):
             self.keep_cube_attached_to_box_1()
             self.keep_cube_attached_to_box_3()
-        
-        # Franka状态机运行逻辑 - 无论是否在LLM模式下都要运行
+
         franka_should_run = False
         
         if not getattr(self.llm_manager, 'llm_mode_active', False):
-            # 非LLM模式：等待一定时间后运行
             if self.wait_counter < self.wait_steps:
                 self.wait_counter += 1
             else:
                 franka_should_run = True
         else:
-            # LLM模式：如果franka_counter已设置（表示LLM已下达pick指令），则运行状态机
             if hasattr(self, 'franka_counter') and self.franka_counter in [0, 2, 4]:
                 franka_should_run = True
         
@@ -3560,7 +3532,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             else:
                 self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
         else:
-            # LLM模式下的备用逻辑
             if getattr(self, '_llm_waiting_for_plan', True):
                 self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
             else:
@@ -3570,7 +3541,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                     else:
                         self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
                 else:
-                    # 没有target_id时，执行原有的逻辑 - 同样需要支持LLM模式下的franka运行
                     franka_should_run_fallback = False
                     
                     if not getattr(self.llm_manager, 'llm_mode_active', False):
