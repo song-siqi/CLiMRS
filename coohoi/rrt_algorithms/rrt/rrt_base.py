@@ -41,7 +41,13 @@ class RRTBase(object):
         :param tree: int, tree to which to add vertex
         :param v: tuple, vertex to add
         """
-        self.trees[tree].V.insert(0, v + v, v)
+        # RTree expects (minx, miny, maxx, maxy) format for 2D
+        if len(v) == 2:
+            # For 2D coordinates, create bounding box (minx, miny, maxx, maxy)
+            self.trees[tree].V.insert(0, (v[0], v[1], v[0], v[1]), v)
+        else:
+            # For other dimensions, use the original logic
+            self.trees[tree].V.insert(0, v + v, v)
         self.trees[tree].V_count += 1  # increment number of vertices in tree
         self.samples_taken += 1  # increment number of samples taken
 

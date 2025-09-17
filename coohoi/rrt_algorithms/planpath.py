@@ -305,14 +305,24 @@ def plan_path_to_franka(gym, sim, device, env_ptr, root_state, robot_handle, box
             box_center = np.array(push_target)
             if len(path) >= 2:
                 prev = path[-1]
-                dir_vec = box_center - prev
+                # 确保维度匹配：box_center是2D，prev是3D，取前两个维度
+                if len(prev) == 3:
+                    prev_2d = prev[:2]
+                else:
+                    prev_2d = prev
+                dir_vec = box_center - prev_2d
                 norm = np.linalg.norm(dir_vec)
                 if norm > 1e-3:
                     unit_dir = dir_vec / norm
-                    prep = (box_center - unit_dir * 1.0).tolist()
-                    path.extend([prep, box_center.tolist()])
+                    prep_2d = box_center - unit_dir * 1.0
+                    # 将2D坐标扩展为3D（z=0）
+                    prep = [prep_2d[0], prep_2d[1], 0.0]
+                    box_center_3d = [box_center[0], box_center[1], 0.0]
+                    path.extend([prep, box_center_3d])
             else:
-                path.append(box_center.tolist())
+                # 将2D坐标扩展为3D（z=0）
+                box_center_3d = [box_center[0], box_center[1], 0.0]
+                path.append(box_center_3d)
 
             X_dimensions = np.array([(-6, 6), (-10, 10)])
             # plot_obstacles(X_dimensions, obstacles, robot_pos, push_target, path)
