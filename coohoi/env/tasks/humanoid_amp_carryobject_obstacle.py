@@ -68,7 +68,7 @@ class LLMManager:
     def __init__(self, task_instance, enable_llm=True):
         self.task = task_instance
         self.enable_llm = enable_llm
-        self.llm_update = 200
+        self.llm_update = 50  # 更频繁的LLM调用
         self.llm_mode_active = False
         self.arena_multi_agent = None
         self.llm_planning_integration = None
@@ -131,6 +131,7 @@ class LLMManager:
                         3: ('mobile_car_2', 202),  # right wheel  
                         4: ('mobile_car_3', 203)   # trunk
                     }
+                    self.use_agent_grouping = True
                     
                 def get_observations(self):
                     try:
@@ -393,7 +394,7 @@ class LLMManager:
             {
                 'agent_id': 1,
                 'args': args, 
-                'agent_node': {'id': 606, 'class_name': 'robot_arm'},
+                'agent_node': {'id': 606, 'class_name': 'franka'},
                 'init_graph': {'nodes': [], 'edges': []}
             },
             {
@@ -411,7 +412,7 @@ class LLMManager:
             {
                 'agent_id': 4,
                 'args': args,
-                'agent_node': {'id': 203, 'class_name': 'mobile_car_3'}, 
+                'agent_node': {'id': 203, 'class_name': 'mobile_car_3'},
                 'init_graph': {'nodes': [], 'edges': []}
             }
         ]
@@ -441,9 +442,8 @@ class LLMManager:
                 self.arena_multi_agent.dialogue_history = getattr(self.task, 'dialogue_history', "")
                 self.arena_multi_agent.total_dialogue_history = getattr(self.task, 'total_dialogue_history', [])
                 
-                # Optional: Use agent grouping for complex multi-agent coordination
-                # You can enable this by setting use_agent_grouping=True
-                if getattr(self.task, 'use_agent_grouping', False) and step_count % 5 == 0:  # Every 5 steps
+                # 使用agent grouping进行多智能体协调
+                if hasattr(self.task, 'use_agent_grouping') and self.task.use_agent_grouping and step_count % 3 == 0:
                     try:
                         area_positions, agent_positions = self.task.get_positions_for_prompt(0, None)
                         obs = {
@@ -461,8 +461,8 @@ class LLMManager:
                         
                         if grouping_result and grouping_result['success']:
                             print(f"📋 Agent Groups Generated:\n{grouping_result['structured_groups']}")
-                            print(f"💡 Grouping Strategy:\n{grouping_result['vanilla_strategy'][:500]}...")  # First 500 chars
-                            # The grouping results can be used to coordinate agents more effectively
+                            print(f"💡 Grouping Strategy:\n{grouping_result['vanilla_strategy'][:500]}...")
+                            self._apply_grouping_strategy(grouping_result['structured_groups'])
                     except Exception as grouping_error:
                         print(f"Agent grouping failed: {grouping_error}")
                 
@@ -477,6 +477,37 @@ class LLMManager:
                 print(f"LLM planning failed: {e}")
                 return None, None
         return None, None
+    
+    def _apply_grouping_strategy(self, structured_groups):
+        """解析和应用agent grouping策略"""
+        try:
+            lines = structured_groups.strip().split('\n')
+            for line in lines:
+                if line.startswith('Group ') and ':' in line:
+                    # 解析组别和子目标
+                    parts = line.split(' - Sub-goal: ')
+                    if len(parts) == 2:
+                        group_part = parts[0]
+                        sub_goal = parts[1]
+                        
+                        # 提取agent信息
+                        agents_part = group_part.split(': ')[1] if ': ' in group_part else ''
+                        
+                        print(f"🎯 Applying strategy: {sub_goal}")
+                        
+                        # 根据子目标调整任务优先级
+                        if "transport" in sub_goal.lower() or "move" in sub_goal.lower():
+                            # 优先执行移动任务
+                            self.task.prioritize_movement = True
+                        elif "assemble" in sub_goal.lower() or "pick" in sub_goal.lower():
+                            # 优先执行装配任务
+                            self.task.prioritize_assembly = True
+                        elif "clear" in sub_goal.lower() or "obstacle" in sub_goal.lower():
+                            # 优先执行清理任务
+                            self.task.prioritize_clearing = True
+                            
+        except Exception as e:
+            print(f"Failed to apply grouping strategy: {e}")
 
     def _any_robot_executing_waypoints(self):
         task = self.task
@@ -593,6 +624,12 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         
         self.llm_manager = LLMManager(self, enable_llm=True)
         self.is_ask_llm = False
+        
+        # Agent grouping策略标志
+        self.prioritize_movement = False
+        self.prioritize_assembly = False  
+        self.prioritize_clearing = False
+        self.use_agent_grouping = True
 
         self.target_position = torch.tensor([1.0, 7.5]).to(device)
         self.update_pos = torch.tensor([0.02,0.02]).to(device)
@@ -2571,6 +2608,16 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
   
     def _execute_llm_action(self, agent_action, agent_message):
         try:
+            print(f"🤖 Executing LLM Action: {agent_action}")
+            
+            # 根据grouping策略调整执行优先级
+            if getattr(self, 'prioritize_movement', False):
+                print("🚚 Movement priority activated")
+            elif getattr(self, 'prioritize_assembly', False):
+                print("🔧 Assembly priority activated")  
+            elif getattr(self, 'prioritize_clearing', False):
+                print("🧹 Clearing priority activated")
+            
             robot_match = re.search(r'<([^>]+)>\s*\((\d+)\)', agent_action)
             action_type = None
             
