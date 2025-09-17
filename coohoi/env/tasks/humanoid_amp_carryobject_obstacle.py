@@ -29,10 +29,15 @@ try:
     LLM_DEV_REVISION_AVAILABLE = True
 except ImportError:
     LLM_DEV_REVISION_AVAILABLE = False
+
+try:
     from env.LLM_API.ask_Llm import LLMWorkflow
     from env.LLM_API.split_llm_with_skills import parse_workflow_text, SKILL_MAP
     from env.LLM_API.gym_llm_integration import GymLLMIntegration
     from env.LLM_API.gym_llm_planning_integration import GymLLMPlanningIntegration
+except ImportError:
+    # LLM API不可用
+    pass
 
 # TODO:
 # 单LLM做多决策
@@ -193,15 +198,15 @@ class LLMManager:
                             
                             available_actions = []
                             if agent_state['status'] == 'idle':
-                                available_actions.append("[move] <mobile_car_1> (201) move to component location using RRT path")
+                                available_actions.append("[move] <mobile_car_1> (201) move to assigned component location using RRT path")
                             elif agent_state['status'] == 'moved':
-                                available_actions.append("[push] <mobile_car_1> (201) push selected component to franka area")
+                                available_actions.append("[push] <mobile_car_1> (201) push assigned component to franka area")
                             elif agent_state['status'] == 'moving':
                                 # 如果正在移动，也允许推动作为备选
-                                available_actions.append("[push] <mobile_car_1> (201) push selected component to franka area")
+                                available_actions.append("[push] <mobile_car_1> (201) push assigned component to franka area")
                             elif agent_state['status'] == 'pushed':
                                 # 如果已经推送，允许等待或移动到下一个目标
-                                available_actions.append("[move] <mobile_car_1> (201) move to component location using RRT path")
+                                available_actions.append("[move] <mobile_car_1> (201) move to assigned component location using RRT path")
                             
                             available_actions.append("[wait] <mobile_car_1> (201) wait")
                         elif i == 3:  # mobile_car_2 agent (right wheel)
@@ -222,15 +227,13 @@ class LLMManager:
                             
                             available_actions = []
                             if agent_state['status'] == 'idle':
-                                available_actions.append("[move] <mobile_car_2> (202) move to component location using RRT path")
+                                available_actions.append("[move] <mobile_car_2> (202) move to assigned component location using RRT path")
                             elif agent_state['status'] == 'moved':
-                                available_actions.append("[push] <mobile_car_2> (202) push selected component to franka area")
+                                available_actions.append("[push] <mobile_car_2> (202) push assigned component to franka area")
                             elif agent_state['status'] == 'moving':
-                                # 如果正在移动，也允许推动作为备选
-                                available_actions.append("[push] <mobile_car_2> (202) push selected component to franka area")
+                                available_actions.append("[push] <mobile_car_2> (202) push assigned component to franka area")
                             elif agent_state['status'] == 'pushed':
-                                # 如果已经推送，允许等待或移动到下一个目标
-                                available_actions.append("[move] <mobile_car_2> (202) move to component location using RRT path")
+                                available_actions.append("[move] <mobile_car_2> (202) move to assigned component location using RRT path")
                             
                             available_actions.append("[wait] <mobile_car_2> (202) wait")
                         elif i == 4:  # mobile_car_3 agent (trunk)
@@ -251,15 +254,13 @@ class LLMManager:
                             
                             available_actions = []
                             if agent_state['status'] == 'idle':
-                                available_actions.append("[move] <mobile_car_3> (203) move to component location using RRT path")
+                                available_actions.append("[move] <mobile_car_3> (203) move to assigned component location using RRT path")
                             elif agent_state['status'] == 'moved':
-                                available_actions.append("[push] <mobile_car_3> (203) push selected component to franka area")
+                                available_actions.append("[push] <mobile_car_3> (203) push assigned component to franka area")
                             elif agent_state['status'] == 'moving':
-                                # 如果正在移动，也允许推动作为备选
-                                available_actions.append("[push] <mobile_car_3> (203) push selected component to franka area")
+                                available_actions.append("[push] <mobile_car_3> (203) push assigned component to franka area")
                             elif agent_state['status'] == 'pushed':
-                                # 如果已经推送，允许等待或移动到下一个目标
-                                available_actions.append("[move] <mobile_car_3> (203) move to component location using RRT path")
+                                available_actions.append("[move] <mobile_car_3> (203) move to assigned component location using RRT path")
                             
                             available_actions.append("[wait] <mobile_car_3> (203) wait")
                         else:
@@ -363,7 +364,6 @@ class LLMManager:
                             })
                     
                     elif "[check]" in action:
-                        # Franka check action
                         component_match = re.search(r'check <([^>]+)>', action)
                         if component_match:
                             component = component_match.group(1)
@@ -377,7 +377,6 @@ class LLMManager:
                             })
                     
                     elif "[pick]" in action:
-                        # Franka pick and place action
                         action_result = f"{agent_key} has successfully picked and placed component for assembly"
                         satisfied.append(action_result)
                         task_results.append({
@@ -446,7 +445,11 @@ class LLMManager:
         
         if step_count % self.llm_update == 0:
             if self.arena_multi_agent:
-                if not self._any_robot_executing_waypoints():
+                allow_update = True
+                if self._any_robot_executing_waypoints():
+                    allow_update = False
+                
+                if allow_update:
                     action, message = self.run_llm_planning(step_count)
                     if action and action != "None":
                         self.llm_mode_active = True
@@ -471,49 +474,47 @@ class LLMManager:
                             'dialogue_history': getattr(self.task, 'total_dialogue_history', [])
                         }
                         
-                        # 使用真正的siqi grouping机制
-                        print("🔍 Applying real agent grouping from siqi")
+                        # 使用dev_revision的grouping机制，融合siqi的思想
+                        print("🔍 Applying agent grouping with siqi's approach")
                         try:
                             # 准备grouping参数
                             observations = str(obs)
                             task_goal = self.arena_multi_agent.env.goal_instruction or "Assemble the car components"
                             dialogue_history = "\n".join(getattr(self.task, 'total_dialogue_history', []))
                             
-                            # 调用oracle planner的agent_grouping方法
+                            # 调用dev_revision版本的agent_grouping方法
                             grouping_result = self.arena_multi_agent.oracle_planner.agent_grouping(
                                 observations=observations,
                                 task_goal=task_goal,
                                 dialogue_history=dialogue_history
                             )
                             
+                            # dev_revision版本返回字典格式
                             if grouping_result and grouping_result.get('success', False):
-                                print("✅ Real agent grouping successful!")
-                                print(f"📋 Vanilla Strategy:\n{grouping_result['vanilla_strategy']}")
-                                print(f"📋 Structured Groups:\n{grouping_result['structured_groups']}")
+                                vanilla_strategy = grouping_result['vanilla_strategy']
+                                structured_groups = grouping_result['structured_groups']
+                                print("✅ Agent grouping successful!")
+                                print(f"📋 Vanilla Strategy:\n{vanilla_strategy}")
+                                print(f"📋 Structured Groups:\n{structured_groups}")
                                 
                                 # 存储当前grouping策略
-                                self.task.current_grouping_strategy = grouping_result['structured_groups']
-                                self._apply_grouping_strategy(grouping_result['structured_groups'])
+                                self.task.current_grouping_strategy = structured_groups
+                                self._apply_grouping_strategy(structured_groups)
                             else:
-                                print("❌ Real grouping failed, falling back to simplified grouping")
+                                print("❌ Grouping failed, falling back to simplified grouping")
                                 simplified_groups = self._generate_simple_grouping()
                                 print(f"📋 Agent Groups Generated:\n{simplified_groups}")
                                 self.task.current_grouping_strategy = simplified_groups
                                 self._apply_grouping_strategy(simplified_groups)
                                 
-                        except Exception as real_grouping_error:
-                            print(f"Real grouping failed: {real_grouping_error}")
-                            import traceback
-                            traceback.print_exc()
+                        except Exception as grouping_error:
+                            print(f"Grouping failed: {grouping_error}")
                             # 回退到简化的grouping
                             print("🔄 Falling back to simplified grouping")
-                            try:
-                                simplified_groups = self._generate_simple_grouping()
-                                print(f"📋 Agent Groups Generated:\n{simplified_groups}")
-                                self.task.current_grouping_strategy = simplified_groups
-                                self._apply_grouping_strategy(simplified_groups)
-                            except Exception as simple_error:
-                                print(f"Simplified grouping also failed: {simple_error}")
+                            simplified_groups = self._generate_simple_grouping()
+                            print(f"📋 Agent Groups Generated:\n{simplified_groups}")
+                            self.task.current_grouping_strategy = simplified_groups
+                            self._apply_grouping_strategy(simplified_groups)
                     except Exception as grouping_error:
                         print(f"Agent grouping failed: {grouping_error}")
                 
@@ -604,8 +605,8 @@ Non-assigned Agent: <humanoid>(101) - Reason: Assembly phase, no movement needed
 
     def _any_robot_executing_waypoints(self):
         task = self.task
-        if hasattr(task, 'llm_action_type') and task.llm_action_type == "walk":
-            if task.llm_action_type == "walk_completed":
+        if hasattr(task, 'llm_action_type') and task.llm_action_type in ["walk", "carry"]:
+            if task.llm_action_type in ["walk_completed", "carry_completed"]:
                 return False 
             else:
                 return True  
@@ -2849,17 +2850,25 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         
     def walk_humanoid(self, robot_name, area_name):
         """人形机器人行走"""
-        print(f"Humanoid {robot_name} walking to area {area_name}")
+        print(f"SUCCESS: Humanoid {robot_name} walking to area {area_name}")
         target_id = getattr(self, 'current_target_id', None)
         actual_robot_name = self._convert_llm_robot_name(robot_name, target_id)
         self._assign_waypoints_by_area(actual_robot_name, area_name)
         
+        # 设置LLM动作完成状态
+        self.llm_action_type = "walk_completed"
+        return True
+        
     def carry_obstacle(self, robot_name, target_name):
         """搬运障碍物"""
-        print(f"{robot_name} carrying obstacle {target_name}")
+        print(f"SUCCESS: {robot_name} carrying obstacle {target_name}")
         target_id = getattr(self, 'current_target_id', None)
         actual_robot_name = self._convert_llm_robot_name(robot_name, target_id)
         # 这里可以添加具体的搬运逻辑
+        
+        # 设置LLM动作完成状态
+        self.llm_action_type = "carry_completed"
+        return True
         
     def push_component(self, robot_name, target_name):
         """推动组件"""
