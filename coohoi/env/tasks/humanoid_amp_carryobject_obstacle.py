@@ -453,16 +453,21 @@ class LLMManager:
                             'dialogue_history': getattr(self.task, 'total_dialogue_history', [])
                         }
                         
-                        grouping_result = self.arena_multi_agent.perform_agent_grouping(
-                            observations=obs,
-                            task_goal="Complete robot assembly by coordinating humanoid, mobile cars, and franka arm",
-                            dialogue_history=str(getattr(self.task, 'total_dialogue_history', []))
-                        )
-                        
-                        if grouping_result and grouping_result['success']:
-                            print(f"📋 Agent Groups Generated:\n{grouping_result['structured_groups']}")
-                            print(f"💡 Grouping Strategy:\n{grouping_result['vanilla_strategy'][:500]}...")
-                            self._apply_grouping_strategy(grouping_result['structured_groups'])
+                        # 直接调用oracle_planner的grouping方法
+                        if hasattr(self.arena_multi_agent, 'oracle_planner') and hasattr(self.arena_multi_agent.oracle_planner, 'agent_grouping'):
+                            print("🔍 Using oracle_planner.agent_grouping directly")
+                            grouping_result = self.arena_multi_agent.oracle_planner.agent_grouping(
+                                observations=obs,
+                                task_goal="Complete robot assembly by coordinating humanoid, mobile cars, and franka arm",
+                                dialogue_history=str(getattr(self.task, 'total_dialogue_history', []))
+                            )
+                            
+                            if grouping_result and grouping_result['success']:
+                                print(f"📋 Agent Groups Generated:\n{grouping_result['structured_groups']}")
+                                print(f"💡 Grouping Strategy:\n{grouping_result['vanilla_strategy'][:500]}...")
+                                self._apply_grouping_strategy(grouping_result['structured_groups'])
+                        else:
+                            print("❌ Oracle planner grouping not available")
                     except Exception as grouping_error:
                         print(f"Agent grouping failed: {grouping_error}")
                 
