@@ -118,6 +118,13 @@ CRITICAL FRANKA WORKFLOW:
 3. After successful checks, franka should immediately proceed with [pick] and [place] operations
 4. Assembly sequence: first attach left wheel to trunk, then attach right wheel to trunk
 
+URGENT FRANKA ACTIVATION RULE:
+- IMMEDIATELY when you see: mobile_car_1(201): {'status': 'pushed'}, mobile_car_2(202): {'status': 'pushed'}, mobile_car_3(203): {'status': 'pushed'}
+- DO NOT wait for any other conditions
+- DO NOT ask wheeled robots to do anything else
+- IMMEDIATELY give franka [check] instructions for ALL components
+- This is the HIGHEST PRIORITY - all components are ready for assembly
+
 FRANKA STATUS INTERPRETATION:
 - If all wheeled robots show 'pushed' status -> Components are ready for franka assembly
 - Franka should NEVER wait when components are available - proceed with [check] immediately
@@ -128,5 +135,12 @@ ASSEMBLY COMPLETION LOGIC:
 - When franka completes [pick] and [place] operations, the assembly task is complete
 - Do not ask wheeled robots to perform assembly tasks they cannot do
 - Focus on franka's specialized assembly capabilities when components are ready
+
+IMMEDIATE FRANKA CHECK TRIGGER:
+- If you see ALL THREE of these statuses: 'pushed', 'pushed', 'pushed' for mobile_car_1, mobile_car_2, mobile_car_3
+- STOP everything else and IMMEDIATELY give franka [check] instructions
+- This is the signal that ALL components have arrived at franka area
+- Do NOT delay, do NOT ask for clarification, do NOT wait
+- Start franka assembly process IMMEDIATELY
 
 CRITICAL: Your response MUST start with "Hello <agent_name>(agent_id):" followed by the instruction. Do not start with explanatory text.

@@ -161,7 +161,6 @@ CUDA_VISIBLE_DEVICES=0 python coohoi/run.py --test \
 ```
 
 ```bash
-# 前不撞车
 random.seed(20)
 random.seed(10)
 random.seed(30)
@@ -171,3 +170,27 @@ random.seed(34)
 ```
 
 ## LLM Integrated Part
+```bash
+conda activate coohoi
+export PYTHONPATH=/home/xuanbingxie/Desktop/AIcarrier_cursor:$PYTHONPATH
+python coohoi/run.py
+
+python main.py --env env0 --task 0 --source llm_module
+
+```
+
+## todo :
+ArenaMultiAgent 整体
+python coohoi/run.py
+
+流程：
+1.ArenaMultiAgent 所有规划主流程
+先 run 
+2.promt分组
+3.每一组做plan
+4.每个组的事
+5.环境
+
+把each agent prompt给写了 -> LLM
+
+humanoid: get body tensor
