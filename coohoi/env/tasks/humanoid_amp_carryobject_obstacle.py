@@ -459,6 +459,8 @@ class LLMManager:
                             # 模拟grouping结果
                             simplified_groups = self._generate_simple_grouping()
                             print(f"📋 Agent Groups Generated:\n{simplified_groups}")
+                            # 存储当前grouping策略
+                            self.task.current_grouping_strategy = simplified_groups
                             self._apply_grouping_strategy(simplified_groups)
                         except Exception as simple_error:
                             print(f"Simple grouping failed: {simple_error}")
@@ -506,6 +508,8 @@ Non-assigned Agent: <humanoid>(101) - Reason: Assembly phase, no movement needed
         """解析和应用agent grouping策略"""
         try:
             lines = structured_groups.strip().split('\n')
+            self.task.active_groups = {}
+            
             for line in lines:
                 if line.startswith('Group ') and ':' in line:
                     # 解析组别和子目标
@@ -514,8 +518,17 @@ Non-assigned Agent: <humanoid>(101) - Reason: Assembly phase, no movement needed
                         group_part = parts[0]
                         sub_goal = parts[1]
                         
+                        # 提取group编号
+                        group_num = group_part.split('Group ')[1].split(':')[0]
+                        
                         # 提取agent信息
                         agents_part = group_part.split(': ')[1] if ': ' in group_part else ''
+                        
+                        # 存储group信息
+                        self.task.active_groups[group_num] = {
+                            'agents': agents_part,
+                            'sub_goal': sub_goal
+                        }
                         
                         print(f"🎯 Applying strategy: {sub_goal}")
                         
@@ -523,12 +536,19 @@ Non-assigned Agent: <humanoid>(101) - Reason: Assembly phase, no movement needed
                         if "transport" in sub_goal.lower() or "move" in sub_goal.lower():
                             # 优先执行移动任务
                             self.task.prioritize_movement = True
+                            print("🚚 Movement priority activated")
                         elif "assemble" in sub_goal.lower() or "pick" in sub_goal.lower():
                             # 优先执行装配任务
                             self.task.prioritize_assembly = True
+                            print("🔧 Assembly priority activated")
                         elif "clear" in sub_goal.lower() or "obstacle" in sub_goal.lower():
                             # 优先执行清理任务
                             self.task.prioritize_clearing = True
+                            print("🧹 Clearing priority activated")
+            
+            # 显示active groups
+            if self.task.active_groups:
+                print(f"📊 Active Groups: {len(self.task.active_groups)} groups configured")
                             
         except Exception as e:
             print(f"Failed to apply grouping strategy: {e}")
@@ -654,6 +674,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.prioritize_assembly = False  
         self.prioritize_clearing = False
         self.use_agent_grouping = True
+        self.current_grouping_strategy = None
+        self.active_groups = {}
 
         self.target_position = torch.tensor([1.0, 7.5]).to(device)
         self.update_pos = torch.tensor([0.02,0.02]).to(device)
