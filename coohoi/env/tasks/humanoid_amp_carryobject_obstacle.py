@@ -453,7 +453,15 @@ class LLMManager:
                             'dialogue_history': getattr(self.task, 'total_dialogue_history', [])
                         }
                         
-                        # 直接调用oracle_planner的grouping方法
+                        # 调试并调用oracle_planner的grouping方法
+                        print(f"🔍 Arena multi agent: {type(self.arena_multi_agent)}")
+                        print(f"🔍 Has oracle_planner: {hasattr(self.arena_multi_agent, 'oracle_planner')}")
+                        if hasattr(self.arena_multi_agent, 'oracle_planner'):
+                            print(f"🔍 Oracle planner type: {type(self.arena_multi_agent.oracle_planner)}")
+                            print(f"🔍 Has agent_grouping: {hasattr(self.arena_multi_agent.oracle_planner, 'agent_grouping')}")
+                            available_methods = [m for m in dir(self.arena_multi_agent.oracle_planner) if not m.startswith('_')]
+                            print(f"🔍 Available oracle methods: {available_methods}")
+                        
                         if hasattr(self.arena_multi_agent, 'oracle_planner') and hasattr(self.arena_multi_agent.oracle_planner, 'agent_grouping'):
                             print("🔍 Using oracle_planner.agent_grouping directly")
                             grouping_result = self.arena_multi_agent.oracle_planner.agent_grouping(
