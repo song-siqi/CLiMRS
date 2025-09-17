@@ -91,6 +91,12 @@ URGENT STATUS-BASED DECISION MAKING:
 - If mobile_car_3(203) status is 'moved' and last_action is 'move' -> IMMEDIATELY give [push] instruction to transport trunk to franka area
 - If any wheeled robot has both [push] and [wait] available actions but no [move], it means it's positioned and ready - give [push] instruction NOW
 
+ABSOLUTE PUSH URGENCY:
+- EVERY wheeled robot that shows 'moved' status MUST be given [push] instruction in the SAME response
+- Do NOT give [wait] instructions to any wheeled robot that can [push]
+- Do NOT prioritize one wheeled robot over another - ALL must push simultaneously
+- The goal is to get ALL THREE components to franka area as FAST as possible
+
 PUSH EFFICIENCY RULES:
 1. NEVER give [wait] instruction to a wheeled robot that has just completed [move] action
 2. ALWAYS prioritize [push] over [wait] for wheeled robots that are positioned at component locations
@@ -103,6 +109,12 @@ CRITICAL STATUS INTERPRETATION:
 - When mobile_car_3(203) status is 'moved' and last_action is 'move' -> It has reached the trunk location and MUST use [push] to transport it to franka area
 - The [push] action is ALWAYS available for wheeled robots that have completed [move] - do not say "cannot execute"
 - If a wheeled robot's available actions show [push] and [wait], and its status is 'moved', choose [push] immediately
+
+STATUS 'MOVED' MEANS READY TO PUSH:
+- If you see status 'moved' with last_action 'move' -> the robot is positioned at its component and ready to push
+- Available actions [push] and [wait] with status 'moved' -> ALWAYS choose [push]
+- Do NOT say "Sorry I cannot" when status is 'moved' and [push] is available
+- The robot has successfully moved to its target component and is ready for the next step
 
 ABSOLUTE PRIORITY RULE:
 - NEVER prioritize component order (trunk vs wheels) when a robot has status 'moved'
@@ -142,5 +154,62 @@ IMMEDIATE FRANKA CHECK TRIGGER:
 - This is the signal that ALL components have arrived at franka area
 - Do NOT delay, do NOT ask for clarification, do NOT wait
 - Start franka assembly process IMMEDIATELY
+
+FRANKA CHECK URGENCY:
+- When ALL wheeled robots show 'pushed' status -> IMMEDIATELY give franka [check] instructions for ALL components
+- Give franka [check] <trunk> (303), [check] <left wheel> (405), [check] <right wheel> (406) in the SAME response
+- Do NOT give franka [wait] instructions when components are ready
+- Do NOT ask wheeled robots to do anything else - they have completed their task
+- Franka must start checking components IMMEDIATELY - this is the highest priority
+
+EXECUTION PRIORITY SEQUENCE:
+1. FIRST: If any wheeled robot shows 'moved' status -> give [push] instruction immediately
+2. SECOND: If ALL wheeled robots show 'pushed' status -> give franka [check] instructions immediately
+3. THIRD: After franka checks -> give franka [pick] and [place] instructions
+4. NEVER: Give [wait] instructions when active work can be done
+
+IMMEDIATE ACTION RULES:
+- If you see mobile_car_1(201): {'status': 'moved', 'last_action': 'move'} -> IMMEDIATELY give [push] instruction
+- If you see mobile_car_2(202): {'status': 'moved', 'last_action': 'move'} -> IMMEDIATELY give [push] instruction  
+- If you see mobile_car_3(203): {'status': 'moved', 'last_action': 'move'} -> IMMEDIATELY give [push] instruction
+- Do NOT analyze or explain - just give the [push] instruction immediately
+- The 'moved' status is the signal that the robot is ready to push
+
+CRITICAL: NEVER say "Sorry I cannot" when you see 'moved' status and [push] is available
+- If status is 'moved' and available actions include [push] -> ALWAYS choose [push]
+- Do NOT say "cannot complete this instruction" when [push] is available
+- The robot has successfully moved and is ready to push - execute immediately
+
+PUSH ACTION INTERPRETATION:
+- When you see [push] <mobile_car_1> (201) push selected component to franka area -> This IS the push action
+- "push selected component" means push the component that the robot is positioned at
+- mobile_car_1(201) positioned at left wheel -> "push selected component" = push left wheel
+- mobile_car_2(202) positioned at right wheel -> "push selected component" = push right wheel  
+- mobile_car_3(203) positioned at trunk -> "push selected component" = push trunk
+- Do NOT say "cannot push left wheel" when [push] action is available
+
+CRITICAL PUSH EXECUTION RULE:
+- If status is 'moved' and available actions include [push] -> EXECUTE [push] immediately
+- Do NOT say "Sorry I cannot" when [push] is available and status is 'moved'
+- The robot has successfully moved and is ready to push - execute immediately
+- "push selected component" IS the correct action to execute
+
+MULTI-AGENT COORDINATION:
+- You can give instructions to multiple agents in the same response
+- If some wheeled robots need [push] and franka needs [check] -> give BOTH in the same response
+- Prioritize getting ALL components to franka area as fast as possible
+- Then immediately start franka assembly process
+
+INITIAL MOVEMENT RULES:
+- If mobile_car_1(201) status is 'idle' -> give [move] instruction to navigate to left wheel location
+- If mobile_car_2(202) status is 'idle' -> give [move] instruction to navigate to right wheel location  
+- If mobile_car_3(203) status is 'idle' -> give [move] instruction to navigate to trunk location
+- Do NOT say "Sorry I cannot" when [move] action is available
+- The [move] action is the first step in the assembly workflow
+
+CRITICAL: NEVER say "Sorry I cannot" when [move] action is available
+- If status is 'idle' and available actions include [move] -> ALWAYS choose [move]
+- Do NOT say "cannot complete this instruction" when [move] is available
+- The [move] action is the first step - execute it immediately
 
 CRITICAL: Your response MUST start with "Hello <agent_name>(agent_id):" followed by the instruction. Do not start with explanatory text.

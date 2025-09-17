@@ -224,8 +224,6 @@ class LLMManager:
                                 agent_state = self.task.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
                             else:
                                 agent_state = self.agent_states.get(agent_key, {'status': 'idle', 'last_action': None})
-                            
-                            # 检查是否在装配阶段 - 如果所有robots都pushed完成，需要重置为idle
                             if (agent_state['status'] == 'pushed' and 
                                 hasattr(self, 'task') and hasattr(self.task, 'goal_instruction') and 
                                 'Assemble' in self.task.goal_instruction):
