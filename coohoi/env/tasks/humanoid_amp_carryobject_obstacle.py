@@ -73,7 +73,7 @@ class LLMManager:
     def __init__(self, task_instance, enable_llm=True):
         self.task = task_instance
         self.enable_llm = enable_llm
-        self.llm_update = 10  # 更频繁的LLM调用，从50降低到10
+        self.llm_update = 5
         self.llm_mode_active = False
         self.arena_multi_agent = None
         self.llm_planning_integration = None
@@ -462,7 +462,7 @@ class LLMManager:
                 self.arena_multi_agent.dialogue_history = getattr(self.task, 'dialogue_history', "")
                 self.arena_multi_agent.total_dialogue_history = getattr(self.task, 'total_dialogue_history', [])
                 
-                # 使用agent grouping进行多智能体协调
+                # agent grouping
                 if hasattr(self.task, 'use_agent_grouping') and self.task.use_agent_grouping and step_count % 3 == 0:
                     try:
                         area_positions, agent_positions = self.task.get_positions_for_prompt(0, None)
@@ -472,8 +472,6 @@ class LLMManager:
                             'agent_states': getattr(self.task, 'agent_states', {}),
                             'dialogue_history': getattr(self.task, 'total_dialogue_history', [])
                         }
-                        
-                        print("🔍 Applying agent grouping with siqi's approach")
                         try:
                             observations = str(obs)
                             task_goal = self.arena_multi_agent.env.goal_instruction or "Assemble the car components"
@@ -496,19 +494,9 @@ class LLMManager:
                                 self._apply_grouping_strategy(structured_groups)
                             else:
                                 print("❌ Grouping failed, falling back to simplified grouping")
-                                simplified_groups = self._generate_simple_grouping()
-                                print(f"📋 Agent Groups Generated:\n{simplified_groups}")
-                                self.task.current_grouping_strategy = simplified_groups
-                                self._apply_grouping_strategy(simplified_groups)
                                 
                         except Exception as grouping_error:
                             print(f"Grouping failed: {grouping_error}")
-                            # 回退到简化的grouping
-                            print("🔄 Falling back to simplified grouping")
-                            simplified_groups = self._generate_simple_grouping()
-                            print(f"📋 Agent Groups Generated:\n{simplified_groups}")
-                            self.task.current_grouping_strategy = simplified_groups
-                            self._apply_grouping_strategy(simplified_groups)
                     except Exception as grouping_error:
                         print(f"Agent grouping failed: {grouping_error}")
                 
@@ -524,30 +512,6 @@ class LLMManager:
                 return None, None
         return None, None
     
-    def _generate_simple_grouping(self):
-        """生成简化的agent grouping策略"""
-        # 获取当前任务状态
-        dialogue_history = getattr(self.task, 'total_dialogue_history', [])
-        
-        # 基于任务进度生成grouping策略
-        if len(dialogue_history) < 5:
-            # 初期：专注于组件运输
-            return """Group 1: <mobile_car_1>(201) - Sub-goal: Move to left wheel component location
-Group 2: <mobile_car_2>(202) - Sub-goal: Move to right wheel component location  
-Group 3: <mobile_car_3>(203) - Sub-goal: Move to trunk component location
-Non-assigned Agent: <humanoid>(101) - Reason: Waiting for path clearing needs
-Non-assigned Agent: <franka>(606) - Reason: Waiting for components to arrive"""
-        elif len(dialogue_history) < 10:
-            # 中期：运输组件到装配区域
-            return """Group 1: <mobile_car_1>(201), <mobile_car_2>(202) - Sub-goal: Transport wheel components to franka assembly area
-Group 2: <mobile_car_3>(203) - Sub-goal: Transport trunk to franka assembly area
-Group 3: <franka>(606) - Sub-goal: Prepare for assembly operations
-Non-assigned Agent: <humanoid>(101) - Reason: No obstacles detected"""
-        else:
-            return """Group 1: <franka>(606) - Sub-goal: Assemble left wheel and right wheel onto trunk
-Group 2: <mobile_car_1>(201), <mobile_car_2>(202), <mobile_car_3>(203) - Sub-goal: Return to standby positions
-Non-assigned Agent: <humanoid>(101) - Reason: Assembly phase, no movement needed"""
-
     def _apply_grouping_strategy(self, structured_groups):
         """解析和应用agent grouping策略"""
         try:
@@ -1472,7 +1436,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.wheel2 = self.gym.create_box(
                 self.sim, 0.6, 0.45, 0.3, asset_options)
         self.body_cube = self.gym.create_box(
-                self.sim, 0.6, 0.3, 0.3, asset_options)
+                self.sim, 0.4, 0.3, 0.3, asset_options)
         
         component_cube_handle = self.gym.create_actor(
             env_ptr, self.wheel2, default_pose2, "wheel_2", col_group, col_filter, segmentation_id)
@@ -1560,7 +1524,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             p.friction = 2.0
         self.gym.set_actor_rigid_shape_properties(env_ptr, wheel_handle, props)
         return
-    
+
+# define take and place   
     def prepare_tensors(self):
         _dof_states = self.gym.acquire_dof_state_tensor(self.sim)
         self.dof_states = gymtorch.wrap_tensor(_dof_states)
@@ -1588,8 +1553,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.franka_effort_action = torch.zeros_like(self.franka_pos_action)
 
         return self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm
-        
-    # define take and place   
+           
     def close_gripper(self):
         if self.franka_gripper_target is not None and self.franka_gripper_steps < self.franka_gripper_max_steps:
             all_tensor = self.pd_tar[0]
@@ -1674,6 +1638,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             self.franka_gripper_steps = 0
             return True
 
+# magnetic_force
     def apply_magnetic_force(self,range = 0.2863 , mag = False):
         if not self.franka_cube_handles or not self.franka_body_handles:
             return
@@ -1756,7 +1721,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         else:
             return False
     
-    # path planning
+# path planning
     def _plan_franka_path_to_pre_grasp(self, cube_handle):
         print("Calling _plan_franka_path_to_pre_grasp")
         self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
@@ -2196,7 +2161,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         path = torch.tensor(
             [
                 [-5.0, -8.0],
-                [-0.8, -8.0],
+                [-0.6, -8.0],
                 [-2.0, -8.0],
                 [-2.0, -9.0],
                 [-0.2, -9.0],
@@ -2778,7 +2743,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         if action_type == "move":
             if "mobile_car" in robot_name:
                 simple_robot_id = robot_id - 200 if robot_id > 200 else robot_id
-                # 开始移动时更新状态
                 agent_key = f'mobile_car_{simple_robot_id}({robot_id})'
                 if hasattr(self, 'agent_states') and agent_key in self.agent_states:
                     self.agent_states[agent_key] = {'status': 'moving', 'last_action': 'move'}
@@ -2916,7 +2880,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 distance = torch.norm(component_state_tensor[0:2] - franka_state_tensor[0:2])
                 d = float(distance.item())
                 
-                if d < near_thresh:
+                if d < 0.8:
                     print(f"SUCCESS: Trunk has arrived at franka area (distance: {d:.3f})")
                     print(f"INFO: Trunk is in position, waiting for wheels to be assembled")
                     return True

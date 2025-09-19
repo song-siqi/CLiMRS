@@ -19,11 +19,8 @@ try:
     from LLM.dev_revision.llm_agents.feedback_agent import FeedbackAgent
     from LLM.dev_revision.llm_agents.oracle_planner import OraclePlanner
     ADVANCED_LLM_AVAILABLE = True
-    print("✅ LLM/dev_revision模块加载成功，将使用Oracle规划")
 except ImportError as e:
     ADVANCED_LLM_AVAILABLE = False
-    print(f"❌ LLM/dev_revision模块不可用: {e}")
-    print("📌 系统将使用fallback实现")
 
 class LLMWorkflow:
     def __init__(self, area_positions: Dict[str, Tuple[float, float, float]], 

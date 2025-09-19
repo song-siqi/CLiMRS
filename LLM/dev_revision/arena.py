@@ -196,6 +196,12 @@ class ArenaMultiAgent(object):
             if edge["relation_type"] == "HOLD" and agent_class != 'quadrotor':
                 text += "I am holding a <" + id2node[edge["to_id"]]["class_name"] + ">(" + str(edge["to_id"]) + ") in my hand. \n"    
         
+        # Add agent status information for Oracle decision making
+        if hasattr(self.env, 'agent_states') and self.env.agent_states:
+            text += "\nAgent Status Information:\n"
+            for agent_key, agent_state in self.env.agent_states.items():
+                text += f"{agent_key}: {agent_state}\n"
+        
         # print(text)
         return text
     
