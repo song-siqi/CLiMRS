@@ -905,7 +905,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self.sim, box_length, box_width, box_height, asset_options))
         
             self.obs_component.append(self.gym.create_box(
-                self.sim, 0.6, 0.5, box_height-0.2, asset_options))
+                self.sim, 0.45, 0.45, box_height-0.2, asset_options))
             
         return
 
@@ -1434,7 +1434,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         wheel_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
 
         self.wheel2 = self.gym.create_box(
-                self.sim, 0.6, 0.45, 0.3, asset_options)
+                self.sim, 0.45, 0.45, 0.3, asset_options)
         self.body_cube = self.gym.create_box(
                 self.sim, 0.4, 0.3, 0.3, asset_options)
         
@@ -1661,7 +1661,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             root_state = gymtorch.wrap_tensor(root_state)
             wheel_root_idx = self.gym.get_actor_index(env_ptr, wheel_handle, gymapi.DOMAIN_SIM)
             root_state[wheel_root_idx, 0:3] = torch.tensor(body_pos, device=root_state.device, dtype=root_state.dtype)
-            cube_quat = np.array([0.707, 0.0, 0.0, 0.707])
+            # 适应新车体方向的左轮四元数 (车体已绕Z轴旋转-90°)
+            cube_quat = np.array([0.5, -0.5, 0.5, 0.5])
             root_state[wheel_root_idx, 3:7] = torch.tensor(cube_quat, device=root_state.device, dtype=root_state.dtype)
             self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
             return
@@ -1671,7 +1672,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             wheel_root_idx = self.gym.get_actor_index(env_ptr, wheel_handle, gymapi.DOMAIN_SIM)
             
             root_state[wheel_root_idx, 0:3] = torch.tensor(body_pos, device=root_state.device, dtype=root_state.dtype)
-            cube_quat = np.array([-0.707, 0.0, 0.0, 0.707])
+            cube_quat = np.array([0.5, -0.5, 0.5, 0.5])
+            # cube_quat = np.array([-0.707, 0.0, 0.0, 0.707])
             root_state[wheel_root_idx, 3:7] = torch.tensor(cube_quat, device=root_state.device, dtype=root_state.dtype)
 
             self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
@@ -1702,7 +1704,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             root_state = gymtorch.wrap_tensor(root_state)
             wheel_root_idx = self.gym.get_actor_index(env_ptr, wheel_handle, gymapi.DOMAIN_SIM)
             root_state[wheel_root_idx, 0:3] = torch.tensor(body_pos, device=root_state.device, dtype=root_state.dtype)
-            cube_quat = np.array([-0.707, 0.0, 0.0, 0.707])
+            # cube_quat = np.array([-0.707, 0.0, 0.0, 0.707])
+            cube_quat = np.array([0.5, -0.5, -0.5, -0.5]) 
             root_state[wheel_root_idx, 3:7] = torch.tensor(cube_quat, device=root_state.device, dtype=root_state.dtype)
             self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
             return 
@@ -1713,7 +1716,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             wheel_root_idx = self.gym.get_actor_index(env_ptr, wheel_handle, gymapi.DOMAIN_SIM)
             
             root_state[wheel_root_idx, 0:3] = torch.tensor(body_pos, device=root_state.device, dtype=root_state.dtype)
-            cube_quat = np.array([0.707, 0.0, 0.0, 0.707])
+            # 适应新车体方向的左轮四元数 (车体已绕Z轴旋转-90°) 
+            cube_quat = np.array([0.5, -0.5, -0.5, -0.5]) 
             root_state[wheel_root_idx, 3:7] = torch.tensor(cube_quat, device=root_state.device, dtype=root_state.dtype)
 
             self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
@@ -1781,9 +1785,11 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         all_root_state = gymtorch.wrap_tensor(root_state)
         body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
 
-        cube_quat = np.array([0.707, 0.0, 0.0, 0.707]) # left
+        cube_quat = np.array([0.5, 0.5, -0.5, -0.5]) # 左轮：绕X轴90°+绕Z轴-90°
         place_pos = all_root_state[body_root_idx, 0:3] 
-        pre_place_pos = place_pos + torch.tensor([-0.0, 0.25, 0.2], device=self.device)  
+        # 应用Z轴-90°旋转：[0.0, 0.25, 0.2] → [-0.25, 0.0, 0.2]
+        print("place_pos", place_pos)
+        pre_place_pos = place_pos + torch.tensor([0.25, 0.0, 0.4], device=self.device)  
 
         start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
         end_pose = Pose(pre_place_pos.cpu().numpy(), cube_quat)
@@ -1802,8 +1808,12 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         all_root_state = gymtorch.wrap_tensor(root_state)
         body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
-        place_pos = all_root_state[body_root_idx, 0:3]+torch.tensor([0.0, 0.146, 0.0], device=self.device)
-        cube_quat = np.array([0.707, 0.0, 0.0, 0.707])
+        # 应用Z轴-90°旋转：[0.0, 0.146, 0.0] → [-0.146, 0.0, 0.0]
+        place_pos = all_root_state[body_root_idx, 0:3]+torch.tensor([-0.146, 0.0, 0.0], device=self.device)
+        # 根据车体零件的新旋转状态调整cube_quat
+        # 车体零件现在是 [0.7071, -0.7071, 0.0, 0.0] (绕Z轴旋转-90°)
+        # 正确的左轮四元数：Roll=90°, Pitch=0°, Yaw=-90°
+        cube_quat = np.array([0.5, 0.5, -0.5, -0.5]) # 左轮：绕X轴90°+绕Z轴-90°
         start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
         end_pose = Pose(place_pos.cpu().numpy(), cube_quat)
         path = interpolate(start_pose, end_pose, num_steps=20)
@@ -1891,9 +1901,13 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         all_root_state = gymtorch.wrap_tensor(root_state)
         body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
 
-        cube_quat = np.array([-0.707, 0.0, 0.0, 0.707]) #右
+        # 右侧轮子的四元数，适应新的车体方向
+        # 车体零件现在是 [0.7071, -0.7071, 0.0, 0.0] (绕Z轴旋转-90°)
+        # 正确的右轮四元数：Roll=-90°, Pitch=0°, Yaw=-90°
+        cube_quat = np.array([0.5, -0.5, 0.5, -0.5]) # 右轮：绕X轴-90°+绕Z轴-90°
         place_pos = all_root_state[body_root_idx, 0:3] 
-        pre_place_pos = place_pos + torch.tensor([-0.0, -0.25, 0.2], device=self.device)  
+        # 应用Z轴-90°旋转：[0.0, -0.25, 0.2] → [0.25, 0.0, 0.2]
+        pre_place_pos = place_pos + torch.tensor([0.25, 0.0, 0.2], device=self.device)  
 
         start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
         end_pose = Pose(pre_place_pos.cpu().numpy(), cube_quat)
@@ -1912,9 +1926,12 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         all_root_state = gymtorch.wrap_tensor(root_state)
         body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
-        place_pos = all_root_state[body_root_idx, 0:3]+torch.tensor([0.0, -0.146, 0.0], device=self.device)
+        # 应用Z轴-90°旋转：[0.0, -0.146, 0.0] → [0.146, 0.0, 0.0]
+        place_pos = all_root_state[body_root_idx, 0:3]+torch.tensor([0.146, 0.0, 0.0], device=self.device)
  
-        cube_quat = np.array([-0.707, 0.0, 0.0, 0.707])
+        # 右侧轮子的四元数，适应新的车体方向  
+        # 正确的右轮四元数：Roll=-90°, Pitch=0°, Yaw=-90°
+        cube_quat = np.array([0.5, -0.5, 0.5, -0.5]) # 右轮：绕X轴-90°+绕Z轴-90°
         start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
         end_pose = Pose(place_pos.cpu().numpy(), cube_quat)
         path = interpolate(start_pose, end_pose, num_steps=20)
@@ -2161,11 +2178,11 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         path = torch.tensor(
             [
                 [-5.0, -8.0],
-                [-0.6, -8.0],
+                [-0.5, -8.0],
                 [-2.0, -8.0],
                 [-2.0, -9.0],
-                [-0.2, -9.0],
-                [-0.2, -4.25]
+                [-0.1, -9.0],
+                [-0.1, -4.0]
             ], device=self.device)
         if robot_id == 1:
             self.waypoints = path
@@ -2880,7 +2897,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 distance = torch.norm(component_state_tensor[0:2] - franka_state_tensor[0:2])
                 d = float(distance.item())
                 
-                if d < 0.8:
+                if d < 0.9:
                     print(f"SUCCESS: Trunk has arrived at franka area (distance: {d:.3f})")
                     print(f"INFO: Trunk is in position, waiting for wheels to be assembled")
                     return True
