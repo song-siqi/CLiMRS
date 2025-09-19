@@ -32,6 +32,11 @@ franka (606): The robot arm is a fixed manipulator for precise assembly operatio
 - [pick] <franka> (606) pick and place <right wheel> (406) on <trunk> (303)
 - [wait] <franka> (606) wait
 
+FRANKA EFFICIENCY NOTE: Franka can check multiple components in one instruction. You can give franka multiple [check] tasks simultaneously for efficiency.
+
+IMPORTANT: When all components are ready, give franka ALL THREE checks in ONE message:
+- [check] <trunk> (303), [check] <left wheel> (405), and [check] <right wheel> (406) together
+
 Observation skills (for environmental awareness):
 - [observe] area <A> (001) - only observe, robot doesn't move
 - [observe] area <B> (002) - only observe, robot doesn't move
@@ -85,6 +90,10 @@ EXAMPLE OUTPUT FORMAT:
 "Hello <mobile_car_2>(202): Please use [move] skill to navigate to <right wheel>(406) location, then use [push] skill to transport it to the franka assembly area."
 "Hello <mobile_car_3>(203): Please use [move] skill to navigate to <trunk>(303) location, then use [push] skill to transport it to the franka assembly area."
 
+FRANKA CHECK EXAMPLES:
+"Hello <franka>(606): Please use [check] skill to check <trunk>(303), [check] <left wheel>(405), and [check] <right wheel>(406) for assembly readiness."
+"Hello <franka>(606): Please perform [check] <trunk>(303), [check] <left wheel>(405), and [check] <right wheel>(406) to verify all components are ready for assembly."
+
 CRITICAL PUSH PRIORITY: If any wheeled robot has status 'moved' but has not yet pushed its component, prioritize giving it a [push] instruction immediately. DO NOT let wheeled robots wait after moving - they should push components to franka area as soon as possible after reaching component locations. This is essential for task efficiency and assembly workflow.
 
 URGENT STATUS-BASED DECISION MAKING:
@@ -132,9 +141,10 @@ ORACLE ROLE REMINDER: You are the COORDINATOR, not a robot. Do NOT say "My capab
 
 CRITICAL FRANKA WORKFLOW:
 1. When mobile_car_1, mobile_car_2, and mobile_car_3 all show status 'pushed' -> IMMEDIATELY give franka [check] instructions
-2. Franka should check all components: [check] <trunk> (303), [check] <left wheel> (405), [check] <right wheel> (406)
-3. After successful checks, franka should immediately proceed with [pick] and [place] operations
-4. Assembly sequence: first attach left wheel to trunk, then attach right wheel to trunk
+2. Franka can check all components together: [check] <trunk> (303), [check] <left wheel> (405), [check] <right wheel> (406)
+3. Give all three [check] instructions in ONE message for efficiency
+4. After successful checks, franka should immediately proceed with [pick] and [place] operations
+5. Assembly sequence: first attach left wheel to trunk, then attach right wheel to trunk
 
 URGENT FRANKA ACTIVATION RULE:
 - ONLY when you see ALL THREE: mobile_car_1(201): {'status': 'pushed'}, mobile_car_2(202): {'status': 'pushed'}, mobile_car_3(203): {'status': 'pushed'}
@@ -142,7 +152,8 @@ URGENT FRANKA ACTIVATION RULE:
 - ALL THREE cars must show 'pushed' status simultaneously before assembly can begin
 - DO NOT wait for any other conditions AFTER all three are pushed
 - DO NOT ask wheeled robots to do anything else AFTER all three are pushed
-- IMMEDIATELY give franka [check] instructions for ALL components ONLY when all three are pushed
+- IMMEDIATELY give franka ALL THREE [check] instructions together ONLY when all three are pushed
+- Give franka: [check] <trunk> (303), [check] <left wheel> (405), [check] <right wheel> (406) in ONE message
 - This is the HIGHEST PRIORITY - all components are ready for assembly
 - You are ORACLE giving instructions to franka, NOT a robot saying "I cannot"
 
@@ -168,15 +179,16 @@ IMMEDIATE FRANKA CHECK TRIGGER:
 
 FRANKA CHECK URGENCY:
 - PREREQUISITE CHECK: Verify ALL THREE mobile cars show 'pushed' status before ANY franka [check] instructions
-- When AND ONLY WHEN ALL wheeled robots show 'pushed' status -> IMMEDIATELY give franka [check] instructions for ALL components
-- Give franka [check] <trunk> (303), [check] <left wheel> (405), [check] <right wheel> (406) in the SAME response
+- When AND ONLY WHEN ALL wheeled robots show 'pushed' status -> IMMEDIATELY give franka [check] instructions
+- Give franka ALL THREE [check] instructions together: [check] <trunk> (303), [check] <left wheel> (405), [check] <right wheel> (406)
+- Combine all three checks in ONE message for efficiency
 - Do NOT give franka [wait] instructions when components are ready
 - Do NOT ask wheeled robots to do anything else AFTER they have completed their task
 - Franka must start checking components IMMEDIATELY ONLY after prerequisite is met - this is the highest priority
 
 EXECUTION PRIORITY SEQUENCE:
 1. FIRST: If any wheeled robot shows 'moved' status -> give [push] instruction immediately
-2. SECOND: ONLY if ALL THREE wheeled robots show 'pushed' status -> give franka [check] instructions immediately
+2. SECOND: ONLY if ALL THREE wheeled robots show 'pushed' status -> give franka ALL [check] instructions together immediately
 3. THIRD: After franka checks -> give franka [pick] and [place] instructions
 4. NEVER: Give [wait] instructions when active work can be done
 5. NEVER: Start franka assembly before ALL mobile cars are 'pushed'
