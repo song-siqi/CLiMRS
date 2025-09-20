@@ -121,6 +121,422 @@ class ArenaMultiAgent(object):
             traceback.print_exc()
             return None
 
+    def _parse_structured_groups(self, structured_groups_output, available_agents):
+        """
+        Parse structured groups output into group data structures
+        """
+        parsed_groups = []
+        
+        # Create mapping from agent ID to agent info
+        id_to_agent = {}
+        for agent in available_agents:
+            id_to_agent[agent['id']] = agent
+        
+        # Parse each line
+        lines = structured_groups_output.strip().split('\n')
+        import re
+        
+        for line in lines:
+            if line.strip().startswith('Group ') and ':' in line and '- Sub-goal:' in line:
+                try:
+                    # Extract group number
+                    group_match = re.match(r'Group\s+(\d+):', line)
+                    if not group_match:
+                        continue
+                    group_id = int(group_match.group(1)) - 1  # Convert to 0-based
+                    
+                    # Extract agents part and sub-goal
+                    parts = line.split(' - Sub-goal: ')
+                    if len(parts) != 2:
+                        continue
+                    
+                    agents_part = parts[0].split(': ', 1)[1]  # Everything after "Group X: "
+                    sub_goal = parts[1].strip()
+                    
+                    # Extract agent IDs (filter out objects and only keep actual agents)
+                    agent_pattern = r'<([^>]+)>\((\d+)\)'
+                    agent_matches = re.findall(agent_pattern, agents_part)
+                    
+                    group_agents = []
+                    valid_agent_classes = ['humanoid', 'franka', 'robot arm', 'robot_arm', 'mobile_car', 'mobile_car_1', 'mobile_car_2', 'mobile_car_3', 'quadrotor']
+                    
+                    for class_name, agent_id_str in agent_matches:
+                        try:
+                            agent_id = int(agent_id_str)
+                            # Only add if it's actually an agent (not an object like wheel or trunk)
+                            if agent_id in id_to_agent and any(agent_class in class_name.lower() for agent_class in ['humanoid', 'franka', 'robot', 'mobile_car', 'quadrotor']):
+                                group_agents.append(id_to_agent[agent_id])
+                        except ValueError:
+                            continue
+                    
+                    if group_agents:  # Only add non-empty groups
+                        parsed_groups.append({
+                            'group_id': group_id,
+                            'agents': group_agents,
+                            'sub_goal': sub_goal
+                        })
+                        
+                except Exception as e:
+                    print(f"Error parsing group line: {line}, error: {e}")
+                    continue
+        
+        return parsed_groups
+
+    def _execute_group_agents(self, obs, obs2text, id_name_dict):
+        """
+        Execute complete group agent workflow with parallel action execution
+        """
+        # Extract available agents from observation
+        available_agents = []
+        for i in range(self.num_agents):
+            agent_obs = obs[i]
+            id2node = {node['id']: node for node in agent_obs["nodes"]}
+            agent_id = int(self.env.id_name_dict[i][1])
+            agent_node = id2node[agent_id]
+            
+            agent_info = {
+                "agent_index": i,
+                "id": agent_id,
+                "class_name": agent_node["class_name"],
+                "properties": agent_node["properties"],
+                "states": agent_node["states"],
+                "observation_text": self.agent_obs2text(obs, i)
+            }
+            available_agents.append(agent_info)
+        
+        # Perform agent grouping
+        max_retries = 3
+        retry_count = 0
+        parsed_groups = []
+        
+        while retry_count < max_retries:
+            try:
+                # Use oracle planner to perform agent grouping
+                grouping_result = self.perform_agent_grouping(
+                    observations=obs2text,
+                    task_goal=self.env.goal_instruction,
+                    dialogue_history=self.dialogue_history
+                )
+                
+                if grouping_result and grouping_result['success']:
+                    self.total_cost += grouping_result['usage']
+                    
+                    # Log grouping results
+                    self.write_log_to_file("Vanilla Agent Grouping Strategy: " + grouping_result['vanilla_strategy'])
+                    self.write_log_to_file("Structured Agent Grouping Output: " + grouping_result['structured_groups'])
+                    # Parse grouping results
+                    parsed_groups = self._parse_structured_groups(grouping_result['structured_groups'], available_agents)
+                    
+                    if parsed_groups:  # If we have valid groups, break
+                        break
+                    else:
+                        print(f"No valid groups found. Retry {retry_count + 1}/{max_retries}")
+                        retry_count += 1
+                        
+            except Exception as e:
+                print(f"Failed during agent grouping (attempt {retry_count + 1}/{max_retries}): {e}")
+                if "502" in str(e) or "Bad Gateway" in str(e):
+                    print("Network error detected. Waiting before retry...")
+                    import time
+                    time.sleep(2)
+                retry_count += 1
+
+        # If all retries failed, create single group with all agents as fallback
+        if retry_count >= max_retries or not parsed_groups:
+            parsed_groups = [{
+                'group_id': 0,
+                'agents': available_agents,
+                'sub_goal': "Execute the main task goal"
+            }]
+            self.write_log_to_file("Max retries reached. Using single group with all agents as fallback.")
+            print("Max retries reached. Using single group with all agents as fallback.")
+
+        for group in parsed_groups:
+            group_agent_names = [f"<{agent['class_name']}>({agent['id']})" for agent in group['agents']]
+            group_summary = f"Group {group['group_id']}: {', '.join(group_agent_names)} - Sub-goal: {group['sub_goal']}"
+            self.write_log_to_file(group_summary)
+            print(group_summary)
+
+        # Perform oracle planning for each group and collect actions
+        return self._execute_parallel_groups(parsed_groups, obs, id_name_dict)
+
+    def _execute_parallel_groups(self, parsed_groups, obs, id_name_dict):
+        """
+        Execute oracle planning for each group and run actions in parallel
+        """
+        group_planning_results = []
+        
+        # Oracle planning for each group
+        for group in parsed_groups:
+            # Create observation text for this group only
+            group_obs_text = ''
+            for agent in group['agents']:
+                group_obs_text += agent['observation_text'] + '\n'
+            
+            # Perform oracle planning for this group
+            try:
+                # Create group-specific instruction
+                group_agents_list = [f"<{agent['class_name']}>({agent['id']})" for agent in group['agents']]
+                group_specific_instruction = (
+                    f"IMPORTANT: You are planning ONLY for Group {group['group_id']} agents: {', '.join(group_agents_list)}. "
+                    f"Do NOT give instructions to agents outside this group. "
+                    f"Sub-goal for this group: {group['sub_goal']}. "
+                    f"Overall task: {self.env.goal_instruction}"
+                )
+                
+                vanilla_message, usage = self.oracle_planner.oracle_planning_vanilla(
+                    obs_text=group_obs_text,
+                    goal_instruction=group_specific_instruction,
+                    num_agents=len(group['agents']),
+                    dialogue_history=self.dialogue_history,
+                )
+                self.total_cost += usage
+                
+                self.write_log_to_file(f"Vanilla Oracle Message (Group {group['group_id']}): " + vanilla_message)
+                self.total_dialogue_history.append(f"Vanilla Oracle Message (Group {group['group_id']}): " + vanilla_message)
+                
+                # Extract structured message for this group
+                message, usage = self.oracle_planner.extract_structured_message(vanilla_message)
+                self.total_cost += usage
+                self.write_log_to_file(f"Extracted Oracle Message (Group {group['group_id']}): " + message)
+                
+                # Store planning result for this group
+                group_planning_results.append({
+                    'group_id': group['group_id'],
+                    'agents': group['agents'],
+                    'sub_goal': group['sub_goal'],
+                    'vanilla_message': vanilla_message,
+                    'extracted_message': message
+                })
+                
+            except Exception as e:
+                print(f"Failed to get oracle planning for group {group['group_id']}: {e}")
+                continue
+
+        # Collect all actions for parallel execution
+        actions_to_run = []
+        agent_messages_to_log = []
+        subgoals = []
+        
+        for group_result in group_planning_results:
+            message = group_result['extracted_message']
+            subgoals.append(group_result['sub_goal'])
+            
+            print(f"Processing group {group_result['group_id']} message: {message}")
+
+            # Process each agent in this group
+            for agent_info in group_result['agents']:
+                try:
+                    agent_id = agent_info['id']
+                    class_name = agent_info['class_name']
+                    agent_id_internal = agent_info['agent_index']
+                    agent_obs = agent_info['observation_text']
+                    # Determine prompt path
+                    prompt_path = self._get_prompt_path(class_name)
+                    
+                    chat_agent_info = {
+                        "class_name": class_name,
+                        "id": agent_id,
+                        "observation": agent_obs,
+                        "instruction": message,
+                        "prompt_path": prompt_path
+                    }
+
+                    try:
+                        agent_action, agent_message, llm_info = self.get_actions_feedback(obs, chat_agent_info)
+                        
+                        # Check preconditions before adding action
+                        should_execute = self._check_action_preconditions(agent_action, class_name, agent_id)
+                        
+                        # Only add the action if it's valid and meets preconditions
+                        if agent_action is not None and should_execute:
+                            actions_to_run.append({
+                                "class_name": class_name,
+                                "real_id": agent_id,
+                                "action": agent_action,
+                                "agent_id_internal": agent_id_internal,
+                                "group_id": group_result['group_id']
+                            })
+                            agent_messages_to_log.append(agent_message)
+                        elif agent_action is not None and not should_execute:
+                            actions_to_run.append({
+                                "class_name": class_name,
+                                "real_id": agent_id,
+                                "action": f"[wait] <{class_name}> ({agent_id}) wait for preconditions",
+                                "agent_id_internal": agent_id_internal,
+                                "group_id": group_result['group_id']
+                            })
+                            agent_messages_to_log.append(f"{class_name}({agent_id}): Waiting for preconditions to be met")
+
+                        self.costdict = self.update_dict(f"<{class_name}>({agent_id})", llm_info["LLM"]["cost"], self.costdict)
+                        
+                        self.write_log_to_file(str(llm_info["LLM"]["action_list"]))
+                        self.write_log_to_file(f"<{class_name}>({agent_id}): " + str(agent_message))
+                        self.total_dialogue_history.append(f"<{class_name}>({agent_id}): " + str(agent_message))
+                        
+                    except Exception as agent_error:
+                        print(f"Failed to get action for agent <{class_name}>({agent_id}): {agent_error}")
+                        agent_message = f"<{class_name}>({agent_id}): Failed to get action due to error: {agent_error}"
+                        agent_messages_to_log.append(agent_message)
+                
+                except Exception as e:
+                    print(f"An error occurred processing agent in group {group_result['group_id']}: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+        self.subgoal = " | ".join(subgoals)
+
+        for i, action in enumerate(actions_to_run):
+            print(f"   {i+1}. {action['action']} (Agent: {action['class_name']}({action['real_id']}), Group: {action['group_id']})")
+
+        # Execute actions in parallel or return for LLMManager to handle
+        return self._finalize_group_execution(actions_to_run, agent_messages_to_log)
+
+    def _check_action_preconditions(self, action, class_name, agent_id):
+        """
+        Check if an agent should execute the proposed action based on preconditions
+        """
+        if not action:
+            return False
+        
+        # Get current agent states from environment
+        if hasattr(self.env, 'task') and hasattr(self.env.task, 'agent_states'):
+            agent_states = self.env.task.agent_states
+        else:
+            return True  # Allow execution if we can't check states
+        
+        # Mobile car preconditions
+        if 'mobile_car' in class_name:
+            agent_key = f'mobile_car_{agent_id - 200}({agent_id})'
+            
+            if '[move]' in action:
+                # Move action: can execute if idle or any other non-conflicting state
+                current_status = agent_states.get(agent_key, {}).get('status', 'idle')
+                return current_status in ['idle', 'moved', 'pushed']  # Can re-move if needed
+                
+            elif '[push]' in action:
+                # Push action: can only execute if mobile_car has moved to component location
+                current_status = agent_states.get(agent_key, {}).get('status', 'idle')
+                if current_status == 'moved':
+                    return True
+                else:
+                    print(f"🚫 {agent_key} cannot push - status is '{current_status}', needs to be 'moved'")
+                    return False
+        
+        # Franka/robot arm preconditions
+        elif class_name in ['franka', 'robot arm', 'robot_arm']:
+            if '[check]' in action:
+                # Check action: can only execute if all mobile cars have pushed their components
+                mobile_car_states = {
+                    'mobile_car_1(201)': agent_states.get('mobile_car_1(201)', {}).get('status', 'idle'),
+                    'mobile_car_2(202)': agent_states.get('mobile_car_2(202)', {}).get('status', 'idle'),
+                    'mobile_car_3(203)': agent_states.get('mobile_car_3(203)', {}).get('status', 'idle')
+                }
+                
+                all_pushed = all(status == 'pushed' for status in mobile_car_states.values())
+                if not all_pushed:
+                    print(f"🚫 Franka cannot check - mobile car states: {mobile_car_states}")
+                    print(f"   Waiting for all mobile cars to reach 'pushed' status")
+                    return False
+                return True
+                
+            elif '[pick]' in action:
+                # Pick action: can only execute if franka has completed check
+                franka_key = f'{class_name}({agent_id})'
+                current_status = agent_states.get(franka_key, {}).get('status', 'idle')
+                if current_status in ['checked', 'idle']:  # Assuming 'checked' status after check completion
+                    return True
+                else:
+                    print(f"🚫 {franka_key} cannot pick - status is '{current_status}', needs to complete check first")
+                    return False
+        
+        # Humanoid preconditions
+        elif class_name == 'humanoid':
+            # Humanoid can usually act freely for obstacle clearing
+            return True
+        
+        # Wait actions are always allowed
+        if '[wait]' in action:
+            return True
+            
+        # Default: allow other actions
+        return True
+
+    def _get_prompt_path(self, class_name):
+        """Get appropriate prompt path for agent class"""
+        if class_name == 'quadrotor':
+            return self.quadrotor_prompt_path
+        elif class_name in ['mobile_car', 'mobile_car_1', 'mobile_car_2', 'mobile_car_3']:
+            return self.mobile_car_prompt_path
+        elif class_name == 'humanoid':
+            return self.humanoid_prompt_path
+        elif class_name in ['robot arm', 'robot_arm', 'franka']:
+            return self.robot_arm_prompt_path
+        else:
+            return self.mobile_car_prompt_path  # fallback
+
+    def _finalize_group_execution(self, actions_to_run, agent_messages_to_log):
+        """Finalize the group execution and return results"""
+        if not actions_to_run:
+            done = self.last_done
+            task_results = self.last_task_results
+            satisfied = self.last_satisfied
+            unsatisfied = self.last_unsatisfied
+            self.env.steps += 1
+            id, agent_action, agent_message = [], None, "all robot agents: Group execution failed - no valid actions generated."
+            self.total_dialogue_history.append(agent_message)
+        else:
+            # Store all actions for parallel execution by LLMManager
+            if hasattr(self.env, 'parallel_actions'):
+                self.env.parallel_actions = actions_to_run
+                print(f"📦 Stored {len(actions_to_run)} actions in parallel_actions")
+            else:
+                print("⚠️ env.parallel_actions attribute not found! Cannot store parallel actions.")
+            
+            # Execute the first action as the main action for compatibility
+            main_action = actions_to_run[0]
+            try:
+                done, task_results, satisfied, unsatisfied, steps = self.env.step(
+                    main_action['class_name'], 
+                    main_action['real_id'], 
+                    main_action['action'], 
+                    self.task_goal
+                )
+                self.last_done = done
+                self.last_task_results = task_results
+                self.last_satisfied = satisfied
+                self.last_unsatisfied = unsatisfied
+                
+                # Return info from the main action
+                id = [main_action['agent_id_internal']]
+                agent_action = main_action['action']
+                agent_message = agent_messages_to_log[0] if agent_messages_to_log else "Group execution completed"
+                
+                # Log all parallel actions for debugging
+                print(f"🚀 Main action executed: {main_action['action']}")
+                if len(actions_to_run) > 1:
+                    print(f"📦 Stored {len(actions_to_run)-1} parallel actions for execution:")
+                    for i, action in enumerate(actions_to_run[1:], 1):
+                        print(f"   {i}. {action['action']} (Group {action['group_id']})")
+                
+            except Exception as e:
+                print(f"Exception occurs when performing main action: {main_action['action']}")
+                raise Exception
+
+        # Log costs and dialogue history
+        self.write_log_to_file(f"COST1:{self.total_cost}!!!!!")
+        self.write_log_to_file(str(self.costdict))
+        self.write_log_to_file(f"COST2:{sum(self.costdict.values())}!!!!!")
+        self.write_log_to_file(f'总的花费：{self.total_cost + sum(self.costdict.values())}')
+        self.write_log_to_file('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ ')
+        
+        numbered_list = [f"[{i+1}]、{item}" for i, item in enumerate(self.total_dialogue_history)]
+        self.dialogue_history = '\n'.join(numbered_list[-10:])
+        self.write_log_to_file(f'\nDIALOGUE_HISTORY:\n{self.dialogue_history}')  
+        
+        steps = self.env.steps
+        return done, task_results, satisfied, unsatisfied, id, agent_action, agent_message, steps
+
     def get_actions_feedback(self, obs, chat_agent_info):
 
         for id, agent in enumerate(self.agents):
@@ -244,7 +660,18 @@ class ArenaMultiAgent(object):
                                ''')
         self.write_log_to_file("FULL OBSERVATIONS: \n" + obs2text)
 
-        if self.args.select_agents:
+        if getattr(self.args, 'group_agents', False):
+            '''
+            Agent grouping process (complete group execution):
+            1. Extract available agents from observation
+            2. Perform agent grouping using oracle planner
+            3. Parse grouping results into separate groups
+            4. For each group, perform oracle planning separately
+            5. Execute all group actions in parallel
+            '''
+            return self._execute_group_agents(obs, obs2text, id_name_dict)
+
+        elif self.args.select_agents:
             '''
             Agent selection process:
             1. Extract available agents from observation
