@@ -104,7 +104,6 @@ class ArenaMultiAgent(object):
             )
             
             if grouping_result['success']:
-                print(f"✅ Agent grouping successful!")
                 if self.debug:
                     print(f"Vanilla Strategy:\n{grouping_result['vanilla_strategy']}")
                     print(f"Structured Groups:\n{grouping_result['structured_groups']}")
@@ -426,17 +425,14 @@ class ArenaMultiAgent(object):
         # Franka/robot arm preconditions
         elif class_name in ['franka', 'robot arm', 'robot_arm']:
             if '[check]' in action:
-                # Check action: can only execute if all mobile cars have pushed their components
                 mobile_car_states = {
                     'mobile_car_1(201)': agent_states.get('mobile_car_1(201)', {}).get('status', 'idle'),
                     'mobile_car_2(202)': agent_states.get('mobile_car_2(202)', {}).get('status', 'idle'),
                     'mobile_car_3(203)': agent_states.get('mobile_car_3(203)', {}).get('status', 'idle')
                 }
                 
-                all_pushed = all(status == 'pushed' for status in mobile_car_states.values())
-                if not all_pushed:
-                    print(f"🚫 Franka cannot check - mobile car states: {mobile_car_states}")
-                    print(f"   Waiting for all mobile cars to reach 'pushed' status")
+                any_pushed = any(status == 'pushed' for status in mobile_car_states.values())
+                if not any_pushed:
                     return False
                 return True
                 
@@ -486,6 +482,23 @@ class ArenaMultiAgent(object):
             id, agent_action, agent_message = [], None, "all robot agents: Group execution failed - no valid actions generated."
             self.total_dialogue_history.append(agent_message)
         else:
+            def get_action_priority(action_info):
+                action = action_info['action']
+                if '[push]' in action:
+                    return 1
+                elif '[move]' in action:
+                    return 2
+                elif '[check]' in action:
+                    return 3
+                elif '[pick]' in action:
+                    return 4
+                elif '[wait]' in action:
+                    return 5
+                else:
+                    return 3
+            
+            actions_to_run.sort(key=get_action_priority)
+            
             # Store all actions for parallel execution by LLMManager
             if hasattr(self.env, 'parallel_actions'):
                 self.env.parallel_actions = actions_to_run

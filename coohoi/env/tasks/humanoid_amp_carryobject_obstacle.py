@@ -31,8 +31,6 @@ except ImportError:
     LLM_DEV_REVISION_AVAILABLE = False
 
 
-# TODO:
-# 单LLM做多决策
 # self.component_handles[2] body
 # self.component_handles[0] first wheel   self.component_handles[1] second wheel
 
@@ -159,14 +157,34 @@ class LLMManager:
                                 "[wait] <humanoid> (101) wait"
                             ]
                         elif i == 1:  # franka agent
+                            # ✅ 修复6: 集成Check结果到LLM观察系统
                             available_actions = [
                                 "[check] <franka> (606) check <trunk> (303)",
                                 "[check] <franka> (606) check <left wheel> (405)",
                                 "[check] <franka> (606) check <right wheel> (406)",
-                                "[pick] <franka> (606) pick and place <left wheel> (405) on <trunk> (303)",
-                                "[pick] <franka> (606) pick and place <right wheel> (406) on <trunk> (303)",
                                 "[wait] <franka> (606) wait"
                             ]
+                            
+                            # ✅ 基于check状态动态添加pick actions
+                            if hasattr(self, 'task') and hasattr(self.task, 'component_check_status'):
+                                check_status = self.task.component_check_status
+                                
+                                # 检查trunk和left wheel是否ready
+                                trunk_ready = check_status.get('trunk', {}).get('available', False)
+                                left_wheel_ready = check_status.get('left_wheel', {}).get('available', False)
+                                right_wheel_ready = check_status.get('right_wheel', {}).get('available', False)
+                                
+                                # 只有checked且available的组件才能pick
+                                if trunk_ready and left_wheel_ready:
+                                    available_actions.append("[pick] <franka> (606) pick and place <left wheel> (405) on <trunk> (303)")
+                                if trunk_ready and right_wheel_ready:
+                                    available_actions.append("[pick] <franka> (606) pick and place <right wheel> (406) on <trunk> (303)")
+                            else:
+                                # 兜底：如果没有check状态，添加所有pick actions
+                                available_actions.extend([
+                                    "[pick] <franka> (606) pick and place <left wheel> (405) on <trunk> (303)",
+                                    "[pick] <franka> (606) pick and place <right wheel> (406) on <trunk> (303)"
+                                ])
                         elif i == 2:  # mobile_car_1 agent (left wheel)
                             agent_key = "mobile_car_1(201)"
                             if hasattr(self, 'task') and hasattr(self.task, 'agent_states'):
@@ -251,6 +269,25 @@ class LLMManager:
                             available_actions.append("[wait] <mobile_car_3> (203) wait")
                         else:
                             available_actions = []
+                        
+                        # ✅ 修复6: 添加check状态信息到观察
+                        component_status_info = ""
+                        if hasattr(self, 'task') and hasattr(self.task, 'component_check_status'):
+                            component_status_info = "\nComponent Check Status:\n"
+                            for component, status in self.task.component_check_status.items():
+                                if status['checked']:
+                                    status_str = "✅ READY" if status['available'] else "❌ NOT_READY"
+                                    component_status_info += f"- {component}: {status_str}\n"
+                                else:
+                                    component_status_info += f"- {component}: ⏳ NOT_CHECKED\n"
+                        
+                        # ✅ 添加parallel results信息
+                        parallel_results_info = ""
+                        if hasattr(self, 'task') and hasattr(self.task, 'latest_parallel_results') and self.task.latest_parallel_results:
+                            parallel_results_info = "\nLatest Parallel Results:\n"
+                            for result in self.task.latest_parallel_results[-3:]:  # 只显示最近3个结果
+                                status_icon = "✅" if result.get('result', False) else "❌"
+                                parallel_results_info += f"{status_icon} {result.get('action', 'Unknown')}\n"
                             
                         agent_obs = {
                             "nodes": [
@@ -265,7 +302,9 @@ class LLMManager:
                             ],
                             "edges": [],
                             "agent_in_room_id": 1,
-                            "available_actions": available_actions
+                            "available_actions": available_actions,
+                            "component_check_status": component_status_info,
+                            "parallel_results": parallel_results_info
                         }
                         obs.append(agent_obs)
                     return obs
@@ -445,6 +484,16 @@ class LLMManager:
     def run_llm_planning(self, step_count):
         if self.arena_multi_agent:
             try:
+                # 更新实验统计
+                self.task.experiment_stats['llm_calls'] += 1
+                self.task.experiment_stats['total_steps'] = max(self.task.experiment_stats['total_steps'], step_count // 5)
+                
+                # 每5次LLM调用自动保存一次进度
+                if self.task.experiment_stats['llm_calls'] % 5 == 0:
+                    self.auto_save_progress()
+            
+                self._update_llm_context_with_check_results()
+                
                 self.arena_multi_agent.dialogue_history = getattr(self.task, 'dialogue_history', "")
                 self.arena_multi_agent.total_dialogue_history = getattr(self.task, 'total_dialogue_history', [])
                 
@@ -469,13 +518,39 @@ class LLMManager:
         if not parallel_actions or len(parallel_actions) <= 1:
             return
         
+        # ✅ 修复4: 收集并发执行结果
+        parallel_results = []
+        
         # Execute all actions except the first one (already executed as main action)  
         for action_info in parallel_actions[1:]:
             action = action_info['action']
-            print(f"Executing: {action}")
-            self.task._execute_llm_action(action, "Parallel execution")
+            print(f"Executing parallel: {action}")
+            
+            # ✅ 接收执行结果
+            try:
+                result = self.task._execute_llm_action(action, "Parallel execution")
+                parallel_results.append({
+                    'action': action,
+                    'result': result,
+                    'agent_id': action_info.get('real_id', 0),
+                    'group_id': action_info.get('group_id', 0)
+                })
+                print(f"  ✅ Parallel action result: {result}")
+            except Exception as e:
+                print(f"  ❌ Parallel action failed: {action}, error: {e}")
+                parallel_results.append({
+                    'action': action, 
+                    'result': False,
+                    'error': str(e),
+                    'agent_id': action_info.get('real_id', 0),
+                    'group_id': action_info.get('group_id', 0)
+                })
         
-        self.arena_multi_agent.env.parallel_actions = []
+        # ✅ 保存并发结果供下次LLM调用使用
+        self.task.latest_parallel_results = parallel_results
+        self.arena_multi_agent.env.parallel_actions = []  # 清空已执行的actions
+        
+        print(f"📊 Parallel execution completed: {len(parallel_results)} actions processed")
     
     def _update_main_agent_state(self, action):
         pass
@@ -534,12 +609,26 @@ class LLMManager:
 
     def _any_robot_executing_waypoints(self):
         task = self.task
-        if hasattr(task, 'llm_action_type') and task.llm_action_type in ["walk", "carry"]:
-            if task.llm_action_type in ["walk_completed", "carry_completed"]:
-                return False 
-            else:
-                print(f"🔍 Main agent executing: {task.llm_action_type}")
-                return True  
+        
+        # 🔥 最高优先级：检查push状态，不能被其他状态覆盖
+        if hasattr(task, 'agent_states'):
+            mobile_cars_status = []
+            for key in ['mobile_car_1(201)', 'mobile_car_2(202)', 'mobile_car_3(203)']:
+                status = task.agent_states.get(key, {}).get('status', 'idle')
+                mobile_cars_status.append(status)
+            
+            # 如果任何mobile car还在pushing/moving，立即阻塞LLM
+            if any(status in ['pushing', 'moving'] for status in mobile_cars_status):
+                return True
+            
+            # 检查是否所有active cars都完成push，如果是则重置push mode
+            if hasattr(task, '_llm_push_mode') and getattr(task, '_llm_push_mode', False):
+                active_cars = [status for status in mobile_cars_status if status != 'idle']
+                pushed_cars = [status for status in mobile_cars_status if status == 'pushed']
+                
+                if active_cars and len(pushed_cars) == len(active_cars):
+                    task._llm_push_mode = False
+                    task.llm_action_type = None
         
         if hasattr(task, 'llm_action_type') and task.llm_action_type in ["move", "push"] and hasattr(task, 'current_robot_id'):
             robot_id = task.current_robot_id
@@ -558,18 +647,28 @@ class LLMManager:
                 return False
 
             if waypoints is not None and len(waypoints) > 0 and current_idx < len(waypoints):
-                print(f"🔍 Main robot {simple_robot_id} executing waypoints: {current_idx}/{len(waypoints)}")
                 return True
  
-        if hasattr(task, 'llm_action_type') and task.llm_action_type in ["check", "pick"]:
-            if task.llm_action_type in ["pick_completed"]:
-                return False  
-            else:
-                print(f"🔍 Main agent executing: {task.llm_action_type}")
-                return True  
+        if hasattr(task, 'llm_action_type'):
+            if task.llm_action_type in ["check", "check_completed"]:
+                return False  # 允许下一个LLM规划
+            
+            # Pick操作需要等待完成
+            elif task.llm_action_type == "pick":
+                # 检查franka FSM是否完成
+                if (hasattr(task, 'franka_task_stage') and task.franka_task_stage == 0 and 
+                    hasattr(task, 'franka_count') and task.franka_count > 0):
+                    return False  # Pick已完成
+                elif (hasattr(task, 'franka_task_stage_1') and task.franka_task_stage_1 == 0 and 
+                      hasattr(task, 'llm_action_type') and task.llm_action_type == "pick_completed"):
+                    return False  # Pick已完成
+                else:
+                    print(f"🔍 Franka executing pick operation: stage={getattr(task, 'franka_task_stage', 'unknown')}, stage_1={getattr(task, 'franka_task_stage_1', 'unknown')}")
+                    return True  # Pick仍在执行
+            
+            elif task.llm_action_type in ["pick_completed"]:
+                return False  # Pick已完成，允许下一个规划  
  
-        if hasattr(task, '_llm_push_mode') and getattr(task, '_llm_push_mode', False):
-            return True
         
         # Check if any agents are still executing
         if hasattr(task, 'agent_states'):
@@ -585,12 +684,245 @@ class LLMManager:
         pass
     
     def check_collision_risks(self):
-        # Collision detection now handled by coohoi environment directly
         return []
     
     def execute_safety_control(self, collision_risks):
         # Safety control now handled by coohoi environment directly
         pass
+    
+    def get_experiment_report(self):
+        """生成实验统计报告"""
+        stats = self.task.experiment_stats
+        
+        # 计算成功率
+        total_components = 3
+        move_success_rate = min(stats['stage_progress']['move_completed'] / total_components, 1.0)
+        push_success_rate = min(stats['stage_progress']['push_completed'] / total_components, 1.0) 
+        check_success_rate = min(stats['stage_progress']['check_completed'] / total_components, 1.0)
+        pick_success_rate = min(stats['stage_progress']['pick_completed'] / 2, 1.0)
+        
+        # 整体任务完成率
+        task_completion_rate = 1.0 if stats['task_completed'] else 0.0
+        
+        # 效率指标
+        efficiency_score = 1.0 / max(stats['total_steps'], 1) if stats['total_steps'] > 0 else 0.0
+        llm_efficiency = 1.0 / max(stats['llm_calls'], 1) if stats['llm_calls'] > 0 else 0.0
+        
+        # 鲁棒性指标  
+        recovery_rate = (stats['successful_retries'] / max(stats['agent_failures'], 1)) if stats['agent_failures'] > 0 else 1.0
+        
+        report = {
+            "实验统计": {
+                "总步数": stats['total_steps'],
+                "LLM调用次数": stats['llm_calls'], 
+                "任务完成": stats['task_completed']
+            },
+            "阶段成功率": {
+                "Move": f"{move_success_rate:.1%}",
+                "Push": f"{push_success_rate:.1%}",
+                "Check": f"{check_success_rate:.1%}",
+                "Pick": f"{pick_success_rate:.1%}"
+            },
+            "效率指标": {
+                "任务完成率": f"{task_completion_rate:.1%}",
+                "步数效率": f"{efficiency_score:.3f}",
+                "LLM效率": f"{llm_efficiency:.3f}"
+            },
+            "鲁棒性": {
+                "失败次数": stats['agent_failures'],
+                "恢复次数": stats['successful_retries'],
+                "恢复率": f"{recovery_rate:.1%}"
+            }
+        }
+        
+        return report
+    
+    def print_experiment_report(self):
+        """打印实验报告"""
+        report = self.get_experiment_report()
+        print("\n" + "="*50)
+        for category, metrics in report.items():
+            print(f"\n{category}:")
+            for key, value in metrics.items():
+                print(f"  {key}: {value}")
+        print("="*50 + "\n")
+    
+    def save_experiment_results(self, auto_save=True):
+        """保存实验结果到文件"""
+        if not hasattr(self.task, 'experiment_stats'):
+            return
+            
+        import json
+        import time
+        from datetime import datetime
+        
+        stats = self.task.experiment_stats.copy()
+        
+        # 添加运行时间信息
+        if stats['start_time']:
+            stats['duration_seconds'] = time.time() - stats['start_time']
+            stats['end_time'] = time.time()
+        
+        # 添加时间戳
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stats['timestamp'] = timestamp
+        
+        # 生成文件名
+        experiment_id = stats.get('experiment_id', f'exp_{timestamp}')
+        json_filename = f"{experiment_id}_{timestamp}.json"
+        txt_filename = f"{experiment_id}_{timestamp}_report.txt"
+        
+        json_path = f"{self.task.experiment_save_dir}/{json_filename}"
+        txt_path = f"{self.task.experiment_save_dir}/{txt_filename}"
+        
+        # 保存JSON格式的原始数据
+        try:
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(stats, f, indent=2, ensure_ascii=False)
+            if not auto_save:
+                print(f"✅ 实验数据已保存到: {json_path}")
+        except Exception as e:
+            print(f"❌ 保存JSON文件失败: {e}")
+        
+        # 保存可读的报告格式
+        try:
+            report = self.get_experiment_report()
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write(f"实验报告 - {timestamp}\n")
+                f.write("="*60 + "\n\n")
+                
+                for category, metrics in report.items():
+                    f.write(f"{category}\n")
+                    f.write("-" * len(category) + "\n")
+                    for key, value in metrics.items():
+                        f.write(f"{key}: {value}\n")
+                    f.write("\n")
+                
+                # 添加详细统计
+                f.write("详细统计数据\n")
+                f.write("-" * 20 + "\n")
+                for key, value in stats.items():
+                    if key != 'stage_progress':
+                        f.write(f"{key}: {value}\n")
+                
+                f.write("\n各阶段进度\n")
+                f.write("-" * 20 + "\n")
+                for stage, count in stats.get('stage_progress', {}).items():
+                    f.write(f"{stage}: {count}\n")
+                    
+            if not auto_save:
+                print(f"✅ 实验报告已保存到: {txt_path}")
+        except Exception as e:
+            print(f"❌ 保存报告文件失败: {e}")
+        
+        return json_path, txt_path
+    
+    def auto_save_progress(self):
+        """自动保存进度（增量保存，避免数据丢失）"""
+        try:
+            self.save_experiment_results(auto_save=True)
+        except Exception as e:
+            print(f"⚠️ 自动保存失败: {e}")
+    
+    def update_pick_completion(self, component_name):
+        """更新pick操作完成统计"""
+        if hasattr(self.task, 'experiment_stats'):
+            self.task.experiment_stats['stage_progress']['pick_completed'] += 1
+            print(f"Pick completed for {component_name}. Total picks: {self.task.experiment_stats['stage_progress']['pick_completed']}")
+            
+            # 检查是否任务完成
+            self.check_task_completion()
+    
+    def check_task_completion(self):
+        """检查并更新任务完成状态"""
+        if hasattr(self.task, 'experiment_stats'):
+            stats = self.task.experiment_stats
+            
+            # 检查是否所有阶段都达到预期目标
+            # 假设任务目标是装配2个wheel到trunk上
+            if (stats['stage_progress']['pick_completed'] >= 2 and 
+                stats['stage_progress']['check_completed'] >= 3):
+                
+                if not stats['task_completed']:
+                    stats['task_completed'] = True
+                    print("🎉 任务完成！所有组件已成功装配")
+                    
+                    # 自动保存最终结果
+                    json_path, txt_path = self.save_experiment_results(auto_save=False)
+                    print(f"📁 实验结果已自动保存:")
+                    print(f"   数据文件: {json_path}")
+                    print(f"   报告文件: {txt_path}")
+                
+                return True
+        return False
+    
+    def record_agent_failure(self, agent_name, action_attempted):
+        """记录Agent失败"""
+        if hasattr(self.task, 'experiment_stats'):
+            self.task.experiment_stats['agent_failures'] += 1
+            print(f"❌ Agent failure recorded: {agent_name} failed {action_attempted}")
+    
+    def record_successful_retry(self, agent_name, action_completed):
+        """记录成功重试"""
+        if hasattr(self.task, 'experiment_stats'):
+            self.task.experiment_stats['successful_retries'] += 1
+            print(f"✅ Successful retry recorded: {agent_name} completed {action_completed}")
+    
+    def manual_save_experiment(self):
+        """手动保存实验结果（用户可随时调用）"""
+        if hasattr(self.task, 'experiment_stats'):
+            json_path, txt_path = self.save_experiment_results(auto_save=False)
+            print(f"\n📁 手动保存完成:")
+            print(f"   📊 数据文件: {json_path}")
+            print(f"   📋 报告文件: {txt_path}")
+            return json_path, txt_path
+        else:
+            print("❌ 未找到实验统计数据")
+            return None, None
+    
+    def _update_llm_context_with_check_results(self):
+        if not hasattr(self.task, 'component_check_status'):
+            return
+            
+        check_status = self.task.component_check_status
+        check_summary = []
+        checked_components = []
+        
+        for component, status in check_status.items():
+            if status.get('checked', False):
+                availability = "READY" if status.get('available', False) else "NOT_READY"
+                check_summary.append(f"✅ {component}: {availability}")
+                checked_components.append(component)
+        
+        if check_summary:
+            summary_text = f"SYSTEM: Component Check Status: {'; '.join(check_summary)}"
+            
+            # 更新对话历史
+            if not hasattr(self.task, 'dialogue_history'):
+                self.task.dialogue_history = ""
+            
+            # 避免重复添加相同的check信息
+            if summary_text not in self.task.dialogue_history:
+                self.task.dialogue_history += f"\n{summary_text}"
+            
+            # 为franka agent动态生成可用动作
+            ready_components = [comp for comp, status in check_status.items() 
+                              if status.get('checked', False) and status.get('available', False)]
+            
+            if len(ready_components) >= 2:  
+                # 生成pick动作提示
+                pick_hint = "SYSTEM: Ready for assembly! Available pick actions: "
+                pick_actions = []
+                
+                if 'trunk' in ready_components and 'left_wheel' in ready_components:
+                    pick_actions.append("[pick] left wheel onto trunk")
+                if 'trunk' in ready_components and 'right_wheel' in ready_components:
+                    pick_actions.append("[pick] right wheel onto trunk")
+                
+                if pick_actions:
+                    pick_hint += "; ".join(pick_actions)
+                    if pick_hint not in self.task.dialogue_history:
+                        self.task.dialogue_history += f"\n{pick_hint}"
     
     def get_mobile_robot_stop_flags(self):
         # Mobile robot stop flags now managed internally
@@ -665,6 +997,58 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.use_agent_grouping = True
         self.current_grouping_strategy = None
         self.active_groups = {}
+        
+        # ✅ 修复1: 添加组件检查状态管理
+        self.component_check_status = {
+            'trunk': {'checked': False, 'available': False, 'last_check_time': 0},
+            'left_wheel': {'checked': False, 'available': False, 'last_check_time': 0},
+            'right_wheel': {'checked': False, 'available': False, 'last_check_time': 0}
+        }
+        
+        # ✅ 添加LLM相关状态管理
+        self.latest_check_results = {}
+        self.latest_parallel_results = []
+        self.agent_states = {}
+        
+        # 实验统计系统
+        import time
+        import os
+        self.experiment_stats = {
+            'total_steps': 0,
+            'llm_calls': 0,
+            'stage_progress': {
+                'move_completed': 0,
+                'push_completed': 0, 
+                'check_completed': 0,
+                'pick_completed': 0
+            },
+            'agent_failures': 0,
+            'successful_retries': 0,
+            'start_time': time.time(),
+            'task_completed': False,
+            'experiment_id': f"exp_{int(time.time())}"
+        }
+        
+        # 创建实验结果保存目录
+        self.experiment_save_dir = "/home/xuanbingxie/Desktop/AICarrier_final/experiment_results"
+        os.makedirs(self.experiment_save_dir, exist_ok=True)
+        
+        # 创建说明文件
+        readme_path = f"{self.experiment_save_dir}/README.txt"
+        if not os.path.exists(readme_path):
+            with open(readme_path, 'w', encoding='utf-8') as f:
+                f.write("实验结果文件夹说明\n")
+                f.write("="*30 + "\n\n")
+                f.write("此文件夹包含多Agent协作系统的实验统计结果\n\n")
+                f.write("文件命名规则:\n")
+                f.write("- exp_[timestamp]_[datetime].json: 结构化实验数据\n")
+                f.write("- exp_[timestamp]_[datetime]_report.txt: 可读实验报告\n\n")
+                f.write("实验指标说明:\n")
+                f.write("- Move: mobile cars到达组件位置的成功率\n")
+                f.write("- Push: 组件推送到franka区域的成功率\n")
+                f.write("- Check: franka检查组件状态的成功率\n")
+                f.write("- Pick: franka装配组件的成功率\n\n")
+                f.write("任务完成标准: Pick>=2 且 Check>=3\n")
 
         self.target_position = torch.tensor([1.0, 7.5]).to(device)
         self.update_pos = torch.tensor([0.02,0.02]).to(device)
@@ -882,7 +1266,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self.sim, box_length, box_width, box_height, asset_options))
         
             self.obs_component.append(self.gym.create_box(
-                self.sim, 0.45, 0.45, box_height-0.2, asset_options))
+                self.sim, 0.45, 0.45, box_height-0.25, asset_options))
             
         return
 
@@ -1412,9 +1796,9 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         wheel_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
 
         self.wheel2 = self.gym.create_box(
-                self.sim, 0.45, 0.45, 0.3, asset_options)
+                self.sim, 0.45, 0.45, 0.25, asset_options)
         self.body_cube = self.gym.create_box(
-                self.sim, 0.35, 0.3, 0.3, asset_options)
+                self.sim, 0.35, 0.3, 0.25, asset_options)
         
         component_cube_handle = self.gym.create_actor(
             env_ptr, self.wheel2, default_pose2, "wheel_2", col_group, col_filter, segmentation_id)
@@ -1630,7 +2014,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         body_rb_idx = self.gym.get_actor_index(self.envs[0], body_handle, gymapi.DOMAIN_SIM)
         body_state_tensor = all_root_state[body_rb_idx]
         wheel_pos = cube_state_tensor[0:3].unsqueeze(0).cpu().numpy()
-        body_pos = body_state_tensor[0:3].unsqueeze(0).cpu().numpy()+ np.array([0.165, 0.0, 0.0]) 
+        body_pos = body_state_tensor[0:3].unsqueeze(0).cpu().numpy()+ np.array([0.146, 0.0, 0.0]) 
         diff = body_pos - wheel_pos
         dist = np.linalg.norm(diff)
         magnet_range = range
@@ -1640,7 +2024,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             wheel_root_idx = self.gym.get_actor_index(env_ptr, wheel_handle, gymapi.DOMAIN_SIM)
             root_state[wheel_root_idx, 0:3] = torch.tensor(body_pos, device=root_state.device, dtype=root_state.dtype)
 
-            cube_quat = np.array([0.5, 0.5, -0.5, -0.5])
+            cube_quat = np.array([0.5, 0.5, 0.5, 0.5])
             root_state[wheel_root_idx, 3:7] = torch.tensor(cube_quat, device=root_state.device, dtype=root_state.dtype)
             self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
             return
@@ -1650,7 +2034,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             wheel_root_idx = self.gym.get_actor_index(env_ptr, wheel_handle, gymapi.DOMAIN_SIM)
             
             root_state[wheel_root_idx, 0:3] = torch.tensor(body_pos, device=root_state.device, dtype=root_state.dtype)
-            cube_quat = np.array([0.5, 0.5, -0.5, -0.5])
+            cube_quat = np.array([0.5, 0.5, 0.5, 0.5])
             # cube_quat = np.array([-0.707, 0.0, 0.0, 0.707])
             root_state[wheel_root_idx, 3:7] = torch.tensor(cube_quat, device=root_state.device, dtype=root_state.dtype)
 
@@ -1672,7 +2056,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         body_rb_idx = self.gym.get_actor_index(self.envs[0], body_handle, gymapi.DOMAIN_SIM)
         body_state_tensor = all_root_state[body_rb_idx]
         wheel_pos = cube_state_tensor[0:3].unsqueeze(0).cpu().numpy() 
-        body_pos = body_state_tensor[0:3].unsqueeze(0).cpu().numpy()+ np.array([-0.18, 0.0, 0.0]) 
+        body_pos = body_state_tensor[0:3].unsqueeze(0).cpu().numpy()+ np.array([-0.146, 0.0, 0.0]) 
         diff = body_pos - wheel_pos
         dist = np.linalg.norm(diff)
         magnet_range = range
@@ -1683,7 +2067,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             wheel_root_idx = self.gym.get_actor_index(env_ptr, wheel_handle, gymapi.DOMAIN_SIM)
             root_state[wheel_root_idx, 0:3] = torch.tensor(body_pos, device=root_state.device, dtype=root_state.dtype)
             # cube_quat = np.array([-0.707, 0.0, 0.0, 0.707])
-            cube_quat = np.array([0.5, -0.5, -0.5, -0.5]) 
+            cube_quat = np.array([-0.5, -0.5, 0.5, 0.5]) 
             root_state[wheel_root_idx, 3:7] = torch.tensor(cube_quat, device=root_state.device, dtype=root_state.dtype)
             self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
             return 
@@ -1695,7 +2079,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             
             root_state[wheel_root_idx, 0:3] = torch.tensor(body_pos, device=root_state.device, dtype=root_state.dtype)
 
-            cube_quat = np.array([0.5, -0.5, -0.5, -0.5]) 
+            cube_quat = np.array([-0.5, -0.5, 0.5, 0.5]) 
             root_state[wheel_root_idx, 3:7] = torch.tensor(cube_quat, device=root_state.device, dtype=root_state.dtype)
 
             self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(root_state))
@@ -1764,14 +2148,14 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
 
         # cube_quat = np.array([0.707, 0.0, 0.0, 0.707])
-        cube_quat = np.array([0.5, 0.5, -0.5, -0.5])  #左
+        cube_quat = np.array([0.5, 0.5, -0.5, -0.5]) 
         place_pos = all_root_state[body_root_idx, 0:3] 
-        pre_place_pos = place_pos + torch.tensor([ 0.35, 0.0, 0.2], device=self.device)   
+        pre_place_pos = place_pos + torch.tensor([0.3, 0.0, 0.25], device=self.device)   
 
         start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
         end_pose = Pose(pre_place_pos.cpu().numpy(), cube_quat)
         path = interpolate(start_pose, end_pose, num_steps=150)
-        self.set_franka_path(path, duration=300.0)
+        self.set_franka_path(path, duration=800.0)
 
     def _plan_franka_path_to_place(self):
         self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
@@ -1786,8 +2170,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         all_root_state = gymtorch.wrap_tensor(root_state)
         body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
         
-        place_pos = all_root_state[body_root_idx, 0:3]+torch.tensor([0.35, 0.0, 0.0], device=self.device)
-        cube_quat = np.array([0.5, 0.5, -0.5, -0.5])  #左
+        place_pos = all_root_state[body_root_idx, 0:3]+torch.tensor([0.3, 0.0, 0.0], device=self.device)
+        cube_quat = np.array([0.5, 0.5, -0.5, -0.5]) 
         start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
         end_pose = Pose(place_pos.cpu().numpy(), cube_quat)
         path = interpolate(start_pose, end_pose, num_steps=20)
@@ -1808,7 +2192,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.set_franka_path(path,duration=20.0)
 
     def _franka_take_and_place_fsm(self, cube_handle):
-        # print("FSM stage:", self.franka_task_stage)
         if self.franka_task_stage == 0:
             self._plan_franka_path_to_pre_grasp(cube_handle)
             self.franka_task_stage = 1
@@ -1876,15 +2259,15 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
 
 
-        cube_quat = np.array([0.5, -0.5, 0.5, -0.5]) # 右轮：绕X轴-90°+绕Z轴-90°
+        cube_quat = np.array([0.5, 0.5, 0.5, 0.5]) #右
         place_pos = all_root_state[body_root_idx, 0:3] 
 
-        pre_place_pos = place_pos + torch.tensor([-0.35, 0.0, 0.2], device=self.device)  
+        pre_place_pos = place_pos + torch.tensor([-0.3, 0.0, 0.2], device=self.device)  
 
         start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
         end_pose = Pose(pre_place_pos.cpu().numpy(), cube_quat)
-        path = interpolate(start_pose, end_pose, num_steps=120)
-        self.set_franka_path(path, duration=300.0)
+        path = interpolate(start_pose, end_pose, num_steps=150)
+        self.set_franka_path(path, duration=500.0)
 
     def plan_franka_path_to_place(self):
         self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
@@ -1899,8 +2282,8 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         all_root_state = gymtorch.wrap_tensor(root_state)
         body_root_idx = self.gym.get_actor_index(env_ptr, body_handle, gymapi.DOMAIN_SIM)
 
-        place_pos = all_root_state[body_root_idx, 0:3]+torch.tensor([-0.35, 0.0, 0.0], device=self.device)
-        cube_quat = np.array([0.5, -0.5, 0.5, -0.5]) # 右轮：绕X轴-90°+绕Z轴-90°
+        place_pos = all_root_state[body_root_idx, 0:3]+torch.tensor([-0.3, 0.0, 0.0], device=self.device)
+        cube_quat = np.array([0.5, 0.5, 0.5, 0.5]) #右
         start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
         end_pose = Pose(place_pos.cpu().numpy(), cube_quat)
         path = interpolate(start_pose, end_pose, num_steps=20)
@@ -1988,7 +2371,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         box_pos = root_state[box_root_idx, 0:3]
         box_quat = root_state[box_root_idx, 3:7]
         box_quat = box_quat.unsqueeze(0)
-        offset = torch.tensor([0.0, 0.0, 0.2], device=box_pos.device).unsqueeze(0)
+        offset = torch.tensor([0.0, 0.0, 0.16], device=box_pos.device).unsqueeze(0)
         offset_world = quat_rotate(box_quat, offset).squeeze(0)
         target_cube_pos = box_pos + offset_world
         target_cube_quat = box_quat.squeeze(0)
@@ -2147,11 +2530,11 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         path = torch.tensor(
             [
                 [-5.0, -8.0],
-                [-0.8, -8.0],
-                [-2.3, -8.0],
-                [-2.3, -9.0],
-                [-0.5, -9.0],
-                [-0.5, -4.08]
+                [-0.6, -8.0],
+                [-2.2, -8.0],
+                [-2.2, -9.0],
+                [-0.1, -9.0],
+                [-0.1, -3.85]
             ], device=self.device)
         if robot_id == 1:
             self.waypoints = path
@@ -2165,11 +2548,11 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         path = torch.tensor(
             [
                 [-4.0, 9.0],
-                [-4.0, -2.0],
-                [-4.0, -0.5],
-                [-5.0, -0.5],
-                [-5.0, -2.5],
-                [-1.1, -2.5]
+                [-4.0, -2.3],
+                [-4.0, -0.8],
+                [-5.0, -0.8],
+                [-5.0, -2.8],
+                [-1.1, -2.8]
             ], device=self.device)
         if robot_id == 1:
             self.waypoints = path
@@ -2256,11 +2639,17 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 if hasattr(self, 'agent_states') and 'mobile_car_1(201)' in self.agent_states:
                     if getattr(self, '_llm_push_mode', False):
                         self.agent_states['mobile_car_1(201)'] = {'status': 'pushed', 'last_action': 'push'}
+                        # 更新实验统计
+                        if hasattr(self, 'experiment_stats'):
+                            self.experiment_stats['stage_progress']['push_completed'] += 1
                         if hasattr(self, 'current_robot_id') and (self.current_robot_id == 201 or self.current_robot_id == 1):
                             self._llm_push_mode = False
                             self.llm_action_type = None
                     else:
                         self.agent_states['mobile_car_1(201)'] = {'status': 'moved', 'last_action': 'move'}
+                        # 更新实验统计
+                        if hasattr(self, 'experiment_stats'):
+                            self.experiment_stats['stage_progress']['move_completed'] += 1
             if self.current_wp_idx == 1:
                 self._reset_target2([0])
 
@@ -2305,12 +2694,18 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             if self.current_wp_idx_2 >= len(self.waypoints_2):
                 if hasattr(self, 'agent_states') and 'mobile_car_2(202)' in self.agent_states:
                     if getattr(self, '_llm_push_mode', False):
-                        self.agent_states['mobile_car_2(202)'] = {'status': 'pushed', 'last_action': 'push'}                    
+                        self.agent_states['mobile_car_2(202)'] = {'status': 'pushed', 'last_action': 'push'}
+                        # 更新实验统计
+                        if hasattr(self, 'experiment_stats'):
+                            self.experiment_stats['stage_progress']['push_completed'] += 1
                         if hasattr(self, 'current_robot_id') and (self.current_robot_id == 202 or self.current_robot_id == 2):
                             self._llm_push_mode = False
                             self.llm_action_type = None
                     else:
                         self.agent_states['mobile_car_2(202)'] = {'status': 'moved', 'last_action': 'move'}
+                        # 更新实验统计
+                        if hasattr(self, 'experiment_stats'):
+                            self.experiment_stats['stage_progress']['move_completed'] += 1
 
     def _update_robot_3(self, mobile_robot_3_state_tensor, component_body_state_tensor,
                     all_root_state, step_size):
@@ -2357,12 +2752,18 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                         
                     if getattr(self, '_llm_push_mode', False):
                         self.agent_states['mobile_car_3(203)'] = {'status': 'pushed', 'last_action': 'push'}
+                        # 更新实验统计
+                        if hasattr(self, 'experiment_stats'):
+                            self.experiment_stats['stage_progress']['push_completed'] += 1
                         if hasattr(self, 'current_robot_id') and (self.current_robot_id == 203 or self.current_robot_id == 3):
                             self._llm_push_mode = False
                             self.llm_action_type = None
                             
                     else:
                         self.agent_states['mobile_car_3(203)'] = {'status': 'moved', 'last_action': 'move'}
+                        # 更新实验统计
+                        if hasattr(self, 'experiment_stats'):
+                            self.experiment_stats['stage_progress']['move_completed'] += 1
                         
     def _push_nearest_box(self, robot_state, component_states, component_idxs, direction, step_size, all_root_state):
         box_pos = torch.stack([cs[0:2] for cs in component_states], dim=0)
@@ -2616,7 +3017,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                     self.current_wp_idx_3 += 1
 
     def _generate_rrt_path_for_robot(self, robot_id):
-        # 修复并行问题：直接根据robot_id确定目标，不依赖current_target_name
         if robot_id == 1:
             area = self._get_component_area("left_wheel")
             self._assign_waypoints_by_area("mobile_car_1", area)
@@ -2696,21 +3096,39 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                     target_name = target_match.group(1) if target_match else ""
                 
                 self._set_current_context(robot_name, robot_id, target_name)
-                self._dispatch_action(action_type, robot_name, target_name, robot_id)
+                
+                # ✅ 修复3: 特殊处理check操作，获取返回值
+                if action_type == "check":
+                    check_result = self._dispatch_action_with_result(action_type, robot_name, target_name, robot_id)
+                    
+                    # ✅ 保存check结果供LLM使用
+                    if not hasattr(self, 'latest_check_results'):
+                        self.latest_check_results = {}
+                    self.latest_check_results[target_name] = {
+                        'result': check_result,
+                        'timestamp': self.progress_buf[0].item() if hasattr(self, 'progress_buf') and len(self.progress_buf) > 0 else 0,
+                        'component': target_name
+                    }
+                    
+                    print(f"✅ Check completed: {target_name} = {'READY' if check_result else 'NOT_READY'}")
+                    return check_result  # ✅ 返回结果
+                else:
+                    self._dispatch_action(action_type, robot_name, target_name, robot_id)
+                    return True
                 
             else:
                 print(f"WARNING: 未识别的LLM动作格式: {agent_action}")
+                return False
                 
         except Exception as e:
             print(f"ERROR: 执行LLM动作失败: {e}")
             import traceback
             traceback.print_exc()
+            return False
     
     def _set_current_context(self, robot_name, robot_id, target_name=""):
         self.current_robot_name = robot_name
         self.current_robot_id = robot_id
-        
-        # 简单并行支持：只记录mobile car的robot
         if robot_id >= 201 and robot_id <= 203 and robot_id not in self.active_robot_ids:
             self.active_robot_ids.append(robot_id)
         
@@ -2724,6 +3142,19 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         elif robot_id == 203 or "trunk" in target_name.lower():
             self.current_target_id = 2
             self.current_target_name = "trunk"
+    
+    def _dispatch_action_with_result(self, action_type, robot_name, target_name, robot_id):
+        self.llm_action_type = action_type
+        
+        if action_type == "check":
+            if "franka" in robot_name:
+                return self.franka_check(robot_name, target_name)
+            else:
+                print(f"Check action for {robot_name} on {target_name}")
+                return True  # 默认返回成功
+        else:
+            self._dispatch_action(action_type, robot_name, target_name, robot_id)
+            return True
     
     def _dispatch_action(self, action_type, robot_name, target_name, robot_id):
         self.llm_action_type = action_type
@@ -2750,13 +3181,27 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 
         elif action_type == "check":
             if "franka" in robot_name:
-                self.franka_check(robot_name, target_name)
+                result = self.franka_check(robot_name, target_name)
+                self.llm_action_type = "check"
+                return result
             else:
                 print(f"Check action for {robot_name} on {target_name}")
                 
         elif action_type == "pick":
             print(f"Pick action: {robot_name} picking {target_name}")
             if "franka" in robot_name:
+                if hasattr(self, 'component_check_status'):
+                    if 'left wheel' in target_name:
+                        component_key = 'left_wheel'
+                    elif 'right wheel' in target_name:
+                        component_key = 'right_wheel'
+                    else:
+                        component_key = 'trunk'
+                    
+                    component_status = self.component_check_status.get(component_key, {})
+                    if not component_status.get('checked', False):
+                        return False
+                self.llm_action_type = "pick"
                 self.franka_pick(robot_name, target_name)
             else:
                 print(f"Pick action for {robot_name} on {target_name}")
@@ -2810,7 +3255,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             env_ids = torch.arange(self.num_envs, device=self.device)
             self._target_pos[env_ids, 0] = target_coords[0]
             self._target_pos[env_ids, 1] = target_coords[1]
-            self._target_pos[env_ids, 2] = 0.89  # humanoid height
+            self._target_pos[env_ids, 2] = 0.0  # humanoid height
 
         self.llm_action_type = "walk_completed"
         return True
@@ -2824,7 +3269,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         return True
         
     def push_component(self, robot_name, target_name):
-        """推动组件"""
         print(f"{robot_name} pushing component {target_name}")
         target_id = getattr(self, 'current_target_id', None)
         actual_robot_name = self._convert_llm_robot_name(robot_name, target_id)
@@ -2840,9 +3284,12 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         franka_idx = self.gym.get_actor_index(self.envs[0], self.franka_handles[0], gymapi.DOMAIN_SIM)
         franka_state_tensor = root[franka_idx]
         
-        near_thresh = 0.6
+        near_thresh = 0.9
+        result = False
+        component_key = None
         
         if "left wheel" in target_name.lower():
+            component_key = 'left_wheel'
             if hasattr(self, 'component_cube_handles') and len(self.component_cube_handles) > 0:
                 component_idx = self.gym.get_actor_index(self.envs[0], self.component_cube_handles[0], gymapi.DOMAIN_SIM)
                 component_state_tensor = root[component_idx]
@@ -2850,13 +3297,14 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 d = float(distance.item())
                 
                 if d < near_thresh:
+                    result = True
                     print(f"SUCCESS: Left wheel has arrived at franka area (distance: {d:.3f})")
-                    return True
                 else:
+                    result = False
                     print(f"ERROR: Left wheel not yet at franka area (distance: {d:.3f}, threshold: {near_thresh})")
-                    return False
         
         elif "right wheel" in target_name.lower():
+            component_key = 'right_wheel'
             if hasattr(self, 'component_cube_handles') and len(self.component_cube_handles) > 1:
                 component_idx = self.gym.get_actor_index(self.envs[0], self.component_cube_handles[1], gymapi.DOMAIN_SIM)
                 component_state_tensor = root[component_idx]
@@ -2864,13 +3312,14 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 d = float(distance.item())
                 
                 if d < near_thresh:
+                    result = True
                     print(f"SUCCESS: Right wheel has arrived at franka area (distance: {d:.3f})")
-                    return True
                 else:
+                    result = False
                     print(f"ERROR: Right wheel not yet at franka area (distance: {d:.3f}, threshold: {near_thresh})")
-                    return False
         
         elif "trunk" in target_name.lower():
+            component_key = 'trunk'
             if hasattr(self, 'component_cube_handles') and len(self.component_cube_handles) > 2:
                 component_idx = self.gym.get_actor_index(self.envs[0], self.component_cube_handles[2], gymapi.DOMAIN_SIM)
                 component_state_tensor = root[component_idx]
@@ -2878,15 +3327,42 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 d = float(distance.item())
                 
                 if d < 0.9:
+                    result = True
                     print(f"SUCCESS: Trunk has arrived at franka area (distance: {d:.3f})")
-                    return True
                 else:
-                    print(f"ERROR: Trunk not yet at franka area (distance: {d:.3f}, threshold: {near_thresh})")
-                    return False
-        
+                    result = False
+                    print(f"ERROR: Trunk not yet at franka area (distance: {d:.3f}, threshold: 0.9)")
+                    
         else:
             print(f"WARNING: Unknown target: {target_name}")
-            return False
+            result = False
+        
+        # ✅ 修复2: 保存check结果到状态
+        if component_key and hasattr(self, 'component_check_status'):
+            self.component_check_status[component_key] = {
+                'checked': True,
+                'available': result,
+                'last_check_time': self.progress_buf[0].item() if hasattr(self, 'progress_buf') and len(self.progress_buf) > 0 else 0
+            }
+
+            if hasattr(self, 'experiment_stats'):
+                self.experiment_stats['stage_progress']['check_completed'] += 1
+                
+                if hasattr(self, 'llm_manager'):
+                    self.llm_manager.check_task_completion()
+
+            if hasattr(self, 'llm_manager'):
+                self.llm_manager._update_llm_context_with_check_results()
+            franka_key = f'franka(606)'
+            self.agent_states[franka_key] = {
+                'status': 'check_completed',
+                'last_action': f'check_{component_key}',
+                'check_result': result
+            }
+            
+        if not (hasattr(self, '_llm_push_mode') and getattr(self, '_llm_push_mode', False)):
+            self.llm_action_type = "check_completed"
+        return result
 
     def franka_pick(self, robot_name, target_name):
         print(f"Franka {robot_name} starting pick operation for {target_name}")
@@ -2912,8 +3388,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             elif "right wheel" in target_name.lower():
                 self.franka_task_stage_1 = 0
                 self._franka_take_and_place_fsm2(cube_handle)
-            else:
-                self._franka_take_and_place_fsm(cube_handle)
         else:
             print(f"ERROR: Cannot find component handle for {target_name}")
 
