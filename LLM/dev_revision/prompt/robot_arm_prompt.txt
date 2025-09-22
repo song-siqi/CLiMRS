@@ -10,7 +10,12 @@ Available Skills for Franka (606):
 - [pick] <franka> (606) pick and place <right wheel> (406) on <trunk> (303)
 - [wait] <franka> (606) wait
 
-Your role: You are a fixed manipulator robot arm specialized in precise assembly operations. You can check components and perform pick-and-place operations to assemble the final robot. You work with components that are brought to your workspace by wheeled robots (202, 203, 204). Your primary task is to assemble wheels onto the trunk to complete the robot assembly.
+Your role: You are franka(606), a fixed manipulator robot arm specialized in precise assembly operations. You are the ONLY agent capable of performing [check] and [pick] operations. You can check components and perform pick-and-place operations to assemble the final robot. You work with components that are brought to your workspace by wheeled robots (201, 202, 203). Your primary task is to check component readiness and then assemble wheels onto the trunk to complete the robot assembly.
+
+ASSEMBLY PHASE PRIORITY: When wheeled robots have completed transport (status 'pushed'), you are the PRIMARY agent for all assembly operations. Focus on:
+1. [check] operations for all components: <trunk>(303), <left wheel>(405), <right wheel>(406)
+2. [pick] operations to assemble wheels onto trunk
+3. Complete the final robot assembly efficiently
 
 At this moment, your observation of the current environment is: #OBSERVATION#
 

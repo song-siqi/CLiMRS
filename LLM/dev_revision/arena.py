@@ -864,14 +864,16 @@ class ArenaMultiAgent(object):
 
             if class_name == 'quadrotor':
                 prompt_path = self.quadrotor_prompt_path
-            elif class_name == 'mobile_car':
+            elif class_name == 'mobile_car' or class_name == 'mobile_car_1' or class_name == 'mobile_car_2' or class_name == 'mobile_car_3':
                 prompt_path = self.mobile_car_prompt_path
             elif class_name == 'humanoid':
                 prompt_path = self.humanoid_prompt_path
-            elif class_name == 'robot arm' or class_name == 'robot_arm':
+            elif class_name == 'robot arm' or class_name == 'robot_arm' or class_name == 'franka':
                 prompt_path = self.robot_arm_prompt_path
             else:
-                # Default fallback to mobile_car
+                # Log unrecognized class_name for debugging
+                print(f"WARNING: Unrecognized class_name '{class_name}', defaulting to mobile_car")
+                self.write_log_to_file(f"WARNING: Unrecognized class_name '{class_name}', defaulting to mobile_car")
                 prompt_path = self.mobile_car_prompt_path
 
             chat_agent_info = {

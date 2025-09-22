@@ -98,7 +98,7 @@ class LLMManager:
         args.robot_arm_prompt_path = 'LLM/dev_revision/prompt/robot_arm_prompt.txt'
         args.judge_prompt_path = 'LLM/dev_revision/prompt/judge_prompt.txt'
         args.select_agents = False
-        args.group_agents = True  # Enable complete group execution
+        args.group_agents = False  # Disable grouping for PEFA baseline testing
         
         def env_fn():
             task_ref = self.task 
@@ -121,7 +121,7 @@ class LLMManager:
                         3: ('mobile_car_2', 202),  # right wheel  
                         4: ('mobile_car_3', 203)   # trunk
                     }
-                    self.use_agent_grouping = True
+                    self.use_agent_grouping = False  # Disable for PEFA baseline testing
                     self.parallel_actions = []  # Store parallel actions for execution
                     
                 def get_observations(self):
@@ -655,7 +655,6 @@ class LLMManager:
             
             # Pick操作需要等待完成
             elif task.llm_action_type == "pick":
-                # 检查franka FSM是否完成
                 if (hasattr(task, 'franka_task_stage') and task.franka_task_stage == 0 and 
                     hasattr(task, 'franka_count') and task.franka_count > 0):
                     return False  # Pick已完成
@@ -663,7 +662,6 @@ class LLMManager:
                       hasattr(task, 'llm_action_type') and task.llm_action_type == "pick_completed"):
                     return False  # Pick已完成
                 else:
-                    print(f"🔍 Franka executing pick operation: stage={getattr(task, 'franka_task_stage', 'unknown')}, stage_1={getattr(task, 'franka_task_stage_1', 'unknown')}")
                     return True  # Pick仍在执行
             
             elif task.llm_action_type in ["pick_completed"]:
@@ -994,7 +992,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.prioritize_movement = False
         self.prioritize_assembly = False  
         self.prioritize_clearing = False
-        self.use_agent_grouping = True
+        self.use_agent_grouping = False  # Disable for PEFA baseline testing
         self.current_grouping_strategy = None
         self.active_groups = {}
         
@@ -1030,7 +1028,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         }
         
         # 创建实验结果保存目录
-        self.experiment_save_dir = "/home/xuanbingxie/Desktop/AICarrier_final/experiment_results"
+        self.experiment_save_dir = "/home/xuanbingxie/Desktop/CLiMRBench/AICarrier_final/experiment_results"
         os.makedirs(self.experiment_save_dir, exist_ok=True)
         
         # 创建说明文件
@@ -2113,7 +2111,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         end_pose = Pose(pre_cube_pos[0].cpu().numpy(), cube_quat)
         
         path = interpolate(start_pose, end_pose, num_steps=50)
-        self.set_franka_path(path, duration=50.0)  
+        self.set_franka_path(path, duration=50.0)
 
     def _plan_franka_path_to_grasp(self, cube_handle):
         print("Calling _plan_franka_path_to_grasp")
@@ -2121,7 +2119,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
         all_root_state = gymtorch.wrap_tensor(root_state)
-        # cube_handle = self.component_handles[0]
         cube_root_idx = self.gym.get_actor_index(self.envs[0], cube_handle, gymapi.DOMAIN_SIM)
         cube_state_tensor = all_root_state[cube_root_idx]
         hand_idxs = torch.tensor(self.franka_hand_indices, dtype=torch.long,device=self.device)
@@ -2133,7 +2130,7 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         start_pose = Pose(cur_pos[0].cpu().numpy(), cur_orn[0].cpu().numpy())
         end_pose = Pose(cube_pos[0].cpu().numpy(), cube_quat)
         path = interpolate(start_pose, end_pose, num_steps=10)
-        self.set_franka_path(path, duration=2.0)  
+        self.set_franka_path(path, duration=2.0)    
 
     def _plan_franka_path_to_pre_place(self):
         self.franka_dof_states, self.franka_rb_states, self.j_eef, self.mm = self.prepare_tensors()
@@ -2239,8 +2236,9 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             finished = self._step_franka_path()
             if finished:
                 self.franka_task_stage = 0
-                self.franka_count = 1
                 self.llm_action_type = "pick_completed"  
+                self.current_target_id = None  
+                print(f"SUCCESS: Pick operation completed, cleared current_target_id")
                 if hasattr(self, 'franka_path') and self.franka_path:
                     pose = self.franka_path[-1]
                     self.path_follow(pose)               
@@ -2305,7 +2303,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         self.set_franka_path(path,duration=20.0)
                 
     def _franka_take_and_place_fsm2(self, cube_handle):
-        print("FSM stage:", self.franka_task_stage_1)
         if self.franka_task_stage_1 == 0:
             self._plan_franka_path_to_pre_grasp(cube_handle)
             self.franka_task_stage_1 = 1
@@ -2354,8 +2351,9 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             finished = self._step_franka_path()
             if finished:
                 self.franka_task_stage_1 = 0
-                self.llm_action_type = "pick_completed"  # 标记pick操作完成
-                import pdb; pdb.set_trace() 
+                self.llm_action_type = "pick_completed"  
+                self.current_target_id = None  
+                print(f"SUCCESS: Pick operation 2 completed, cleared current_target_id")
 
 ## mobile robots ##
     def keep_cube_attached_to_box(self, cube_handle, box_handle):
@@ -3370,24 +3368,23 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         cube_handle = None
         if "left wheel" in target_name.lower():
             if hasattr(self, 'component_cube_handles') and len(self.component_cube_handles) > 0:
-                cube_handle = self.component_cube_handles[0]
-                self.franka_counter = 0
+                cube_handle = self.component_handles[0]
+                self.franka_counter = 1  
+                self.current_target_id = 0  
         elif "right wheel" in target_name.lower():
             if hasattr(self, 'component_cube_handles') and len(self.component_cube_handles) > 1:
-                cube_handle = self.component_cube_handles[1]
+                cube_handle = self.component_handles[1]
                 self.franka_counter = 2
+                self.current_target_id = 1 
 
         if cube_handle is not None:
             self.franka_task_stage = 0
             self.franka_count = 0
             self.absorbed = 0
             self.gripper_closed = False
+            self._llm_waiting_for_plan = False
             print(f"SUCCESS: Franka starting FSM for {target_name} with counter={self.franka_counter}")
-            if "left wheel" in target_name.lower():
-                self._franka_take_and_place_fsm(cube_handle)
-            elif "right wheel" in target_name.lower():
-                self.franka_task_stage_1 = 0
-                self._franka_take_and_place_fsm2(cube_handle)
+            
         else:
             print(f"ERROR: Cannot find component handle for {target_name}")
 
@@ -3456,38 +3453,12 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             return llm_robot_name
         
     def _handle_component_0(self):
-        """处理组件0 (wheel1)"""
-        self.franka_counter = 0
-        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        all_root_state = gymtorch.wrap_tensor(root_state)
-        component_wheel_1_state_tensor = all_root_state[-14]  # box1
-        franka_root_idx = self.gym.get_actor_index(self.envs[0], self.franka_handles[0], gymapi.DOMAIN_SIM)
-        franka_state_tensor = all_root_state[franka_root_idx]
-        dist0 = torch.norm(component_wheel_1_state_tensor[0:2] - franka_state_tensor[0:2])
-        d0 = float(dist0.item())
-        near_thresh = 0.6
-        
-        if d0 < near_thresh:
-            self._franka_take_and_place_fsm(self.component_handles[0])
-        else:
-            self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
+        self.franka_counter = 1
+        self._franka_take_and_place_fsm(self.component_handles[0])
     
     def _handle_component_1(self):
-        """处理组件1 (wheel2)"""
-        self.franka_counter = 2
-        root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        all_root_state = gymtorch.wrap_tensor(root_state)
-        component_wheel_2_state_tensor = all_root_state[-5]   # box2
-        franka_root_idx = self.gym.get_actor_index(self.envs[0], self.franka_handles[0], gymapi.DOMAIN_SIM)
-        franka_state_tensor = all_root_state[franka_root_idx]
-        dist1 = torch.norm(component_wheel_2_state_tensor[0:2] - franka_state_tensor[0:2])
-        d1 = float(dist1.item())
-        near_thresh = 0.6
-        
-        if d1 < near_thresh:
-            self._franka_take_and_place_fsm2(self.component_handles[1])
-        else:
-            self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
+        self.franka_counter = 2 
+        self._franka_take_and_place_fsm2(self.component_handles[1])
     
     def _handle_component_2(self):
         root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
@@ -3731,8 +3702,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             if plan_status == "planning":
                 self.llm_manager.llm_mode_active = True
                 self._llm_waiting_for_plan = True
-                if self.progress_buf[0] % 500 == 0:
-                    print(f"⏳ LLM规划中，机器人等待...")
                     
             elif plan_status == "executing":
                 self.llm_manager.llm_mode_active = True
@@ -3745,7 +3714,6 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                 self._llm_waiting_for_plan = False
                 if not hasattr(self, '_llm_execution_completed'):
                     self._llm_execution_completed = True
-                    print(f"SUCCESS: LLM规划执行完成！")
                     
             else:
                 self.llm_manager.llm_mode_active = True
@@ -3769,21 +3737,30 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
         d0 = float(dist0.item())
         d1 = float(dist1.item())
         d2 = float(dist2.item())
-        near_thresh = 0.6
+        near_thresh = 0.7
         # The distance between parts and franka
         if self.absorbed == 1:
             self.apply_magnetic_force(range = 2.0,mag=True)
         if self.absorbed1 == 1:
             self.apply_magnetic_force_1(range = 2.0, mag=True) 
         
-        if not (
-            (self.franka_counter == 0 and d0 < near_thresh) or 
-            (self.franka_counter == 2 and d1 < near_thresh)
-        ):
+        if not (d1 < near_thresh and d0 < near_thresh):
             self.keep_cube_attached_to_box_1()
             self.keep_cube_attached_to_box_3()
 
+        waiting_for_plan = getattr(self, '_llm_waiting_for_plan', True)
+        current_target = getattr(self, 'current_target_id', None)
+        has_pick_action = getattr(self, 'llm_action_type', None) == "pick"
+
+        if not waiting_for_plan and current_target is not None and has_pick_action:
+            if current_target in self.target_id_handlers:
+                self.target_id_handlers[current_target]()
+            else:
+                self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
+            return
+        
         franka_should_run = False
+        
         
         if not getattr(self.llm_manager, 'llm_mode_active', False):
             if self.wait_counter < self.wait_steps:
@@ -3791,24 +3768,30 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
             else:
                 franka_should_run = True
         else:
-            if hasattr(self, 'franka_counter') and self.franka_counter in [0, 2]:
+            if hasattr(self, 'franka_counter') and self.franka_counter in [1, 2]:  
                 franka_should_run = True
-        
+                
         if franka_should_run:
-            if self.franka_counter == 0:
-                if d0 < near_thresh:
-                    self._franka_take_and_place_fsm(self.component_handles[0])
-                else:
+            if d0 < near_thresh and d1 < near_thresh and d2 < near_thresh:
+                if self.wait_counter < self.wait_steps:
+                    self.wait_counter += 1
                     self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
-            elif self.franka_counter == 2:
-                if d1 < near_thresh:
+                else:
+                    if self.franka_counter == 1: 
+                        self._franka_take_and_place_fsm(self.component_handles[0])
+                    elif self.franka_counter == 2:
+                        self._franka_take_and_place_fsm2(self.component_handles[1])
+                    else:
+                        self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
+            else:
+                if self.franka_counter == 2:
                     self._franka_take_and_place_fsm2(self.component_handles[1])
                 else:
                     self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
-            else:
-                self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
         else:
-            if getattr(self, '_llm_waiting_for_plan', True):
+            waiting_for_plan = getattr(self, '_llm_waiting_for_plan', True)
+            current_target = getattr(self, 'current_target_id', None)
+            if waiting_for_plan:
                 self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
             else:
                 if hasattr(self, 'current_target_id') and self.current_target_id is not None:
@@ -3825,20 +3808,15 @@ class HumanoidAMPCarryObjectObstacle(humanoid_amp_task.HumanoidAMPTask):
                         else:
                             franka_should_run_fallback = True
                     else:
-                        if hasattr(self, 'franka_counter') and self.franka_counter in [0, 2, 4]:
+                        if hasattr(self, 'franka_counter') and self.franka_counter in [1, 2, 4]:  # ✅ 改成1
                             franka_should_run_fallback = True
                     
                     if franka_should_run_fallback:
-                        if self.franka_counter == 0:
-                            if d0 < near_thresh:
-                                self._franka_take_and_place_fsm(self.component_handles[0])
-                            else:
-                                self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
+
+                        if self.franka_counter == 1:  
+                            self._franka_take_and_place_fsm(self.component_handles[0])
                         elif self.franka_counter == 2:
-                            if d1 < near_thresh:
-                                self._franka_take_and_place_fsm2(self.component_handles[1])
-                            else:
-                                self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
+                            self._franka_take_and_place_fsm2(self.component_handles[1])
                         else:
                             self.gym.set_dof_position_target_tensor(self.sim, self.pd_tar_tensor)
                     else:
