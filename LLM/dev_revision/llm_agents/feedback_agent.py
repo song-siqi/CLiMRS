@@ -10,7 +10,7 @@ import openai
 from openai import OpenAIError, OpenAI
 from types import SimpleNamespace
 
-from llm_utils.llm_module import Agent, API_KEY_R17B, API_KEY_SIQI, API_URL, API_URL_R17B, MODEL_SELECTION
+from llm_utils.llm_module import Agent, API_KEY_R17B, API_KEY_CLIMRS, API_URL, API_URL_R17B, MODEL_SELECTION
 
 # inherited from Coherent
 class LLM:
@@ -41,7 +41,7 @@ class LLM:
 		
 		elif self.source == 'llm_module':
 
-			api_key = API_KEY_SIQI
+			api_key = API_KEY_CLIMRS
 			api_url = API_URL
 			model = MODEL_SELECTION
 			# model = "gpt-4o-2024-11-20"
@@ -54,11 +54,6 @@ class LLM:
 					# "top_p": 1.0,
 					"n": args.n
 				}
-			# self.device = args.device
-			# self.lm_id = args.lm_id
-			# self.chat = True
-			# self.llm_module = Agent(model=self.lm_id, device=self.device)
-			# self.sampling_params['model'] = self.lm_id
 
 		def lm_engine(source, lm_id, device):
 			# @backoff.on_exception(backoff.expo, OpenAIError)
@@ -593,7 +588,7 @@ class FeedbackAgent:
                 }
 
         elif self.source == 'llm_module':
-            api_key = API_KEY_SIQI
+            api_key = API_KEY_CLIMRS
             api_url = API_URL
             model = MODEL_SELECTION
             self.client = Agent(model=model, api_url=api_url, api_key=api_key)

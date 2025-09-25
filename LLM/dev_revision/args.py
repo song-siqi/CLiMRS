@@ -21,16 +21,28 @@ def get_args():
                     help='debugging mode')
     parser.add_argument('--select_agents', action='store_true', default=False,
                     help='select agents mode')
+    parser.add_argument('--group_agents', action='store_true', default=False,
+                    help='enable agent grouping for multi-agent coordination')
+    parser.add_argument('--no_group_agents', action='store_false', dest='group_agents',
+                    help='disable agent grouping (default behavior)')
     parser.add_argument('--oracle_prompt_path', default="./prompt/oracle_prompt.txt" ,
                     help='path of oracle_prompt')
     parser.add_argument('--agent_selection_prompt_path', default="./prompt/agent_selection_prompt.txt",
                     help='path of agent_selection_prompt')
+    parser.add_argument('--agent_grouping_prompt_path', default="./prompt/agent_grouping_prompt.txt",
+                    help='path of agent_grouping_prompt')
+    parser.add_argument('--agent_grouping_vanilla_prompt_path', default="./prompt/agent_grouping_vanilla_prompt.txt",
+                    help='path of agent_grouping_vanilla_prompt')
     parser.add_argument('--quadrotor_prompt_path', default="./prompt/quadrotor_prompt.txt",
                     help='path of quadrotor_prompt')
     parser.add_argument('--robot_dog_prompt_path', default="./prompt/robot_dog_prompt.txt",
                     help='path of robot_dog_prompt')
     parser.add_argument('--robot_arm_prompt_path', default="./prompt/robot_arm_prompt.txt",
                     help='path of robot_arm_prompt')
+    parser.add_argument('--mobile_car_prompt_path', default="./prompt/mobile_car_prompt.txt",
+                    help='path of mobile_car_prompt')
+    parser.add_argument('--humanoid_prompt_path', default="./prompt/humanoid_prompt.txt",
+                    help='path of humanoid_prompt')
     parser.add_argument('--judge_prompt_path', default="./prompt/judge_prompt.txt",
                     help='path of judge_prompt')
     parser.add_argument('--api_key', default='',

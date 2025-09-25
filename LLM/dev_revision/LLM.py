@@ -9,7 +9,7 @@ import backoff
 import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
-from llm_utils.llm_module import Agent, API_KEY_R17B, API_KEY_SIQI, API_URL, API_URL_R17B, MODEL_SELECTION
+from llm_utils.llm_module import Agent, API_KEY_R17B, API_KEY_CLIMRS, API_URL, API_URL_R17B, MODEL_SELECTION
 
 from types import SimpleNamespace
 
@@ -42,7 +42,7 @@ class LLM:
 		
 		elif self.source == 'llm_module':
 
-			api_key = API_KEY_SIQI
+			api_key = API_KEY_CLIMRS
 			api_url = API_URL
 			model = MODEL_SELECTION
 			# model = "gpt-4o-2024-11-20"

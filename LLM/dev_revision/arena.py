@@ -11,7 +11,7 @@ from openai import OpenAIError,OpenAI
 import backoff
 import traceback
 
-# from llm_test.llm_module import Agent, API_KEY_R17B, API_KEY_SIQI, API_URL, API_URL_R17B, MODEL_SELECTION
+# from llm_test.llm_module import Agent, API_KEY_R17B, API_KEY_CLIMRS, API_URL, API_URL_R17B, MODEL_SELECTION
 from .llm_agents.oracle_planner import OraclePlanner
 
 from types import SimpleNamespace
@@ -111,11 +111,9 @@ class ArenaMultiAgent(object):
                 self.total_cost += grouping_result['usage']
                 return grouping_result
             else:
-                print(f"❌ Agent grouping failed: {grouping_result.get('error', 'Unknown error')}")
                 return None
                 
         except Exception as e:
-            print(f"❌ Agent grouping exception: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -540,7 +538,7 @@ class ArenaMultiAgent(object):
         self.write_log_to_file(f"COST1:{self.total_cost}!!!!!")
         self.write_log_to_file(str(self.costdict))
         self.write_log_to_file(f"COST2:{sum(self.costdict.values())}!!!!!")
-        self.write_log_to_file(f'总的花费：{self.total_cost + sum(self.costdict.values())}')
+        self.write_log_to_file(f'Total cost: {self.total_cost + sum(self.costdict.values())}')
         self.write_log_to_file('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ ')
         
         numbered_list = [f"[{i+1}]、{item}" for i, item in enumerate(self.total_dialogue_history)]
@@ -895,7 +893,7 @@ class ArenaMultiAgent(object):
             self.write_log_to_file(f"COST1:{self.total_cost}!!!!!")
             self.write_log_to_file(str(self.costdict))
             self.write_log_to_file(f"COST2:{sum(self.costdict.values())}!!!!!")
-            self.write_log_to_file(f'总的花费：{self.total_cost + sum(self.costdict.values())}')
+            self.write_log_to_file(f'Total cost: {self.total_cost + sum(self.costdict.values())}')
             self.write_log_to_file('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ ')
 
             self.total_dialogue_history.append(f"<{class_name}>({real_id}): " + str(agent_message))

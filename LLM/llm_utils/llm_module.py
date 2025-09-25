@@ -82,10 +82,10 @@ class Agent:
 
         if response.status_code != 200:
             print(f"Request failed with status code {response.status_code}")
-            print(response.text)  # 可能是 HTML 错误页或者空字符串
+            print(response.text)  
             response.raise_for_status()
 
-        # 检查内容是否非空再尝试解析
+
         if response.text.strip():
             try:
                 json_data = response.json()
@@ -136,7 +136,7 @@ if __name__ == "__main__":
     agent = Agent(
         model=MODEL_DEFAULT,
         api_url=API_URL,
-        api_key=API_KEY_SIQI,
+        api_key=API_KEY_CLIMRS,
     )
 
     '''
