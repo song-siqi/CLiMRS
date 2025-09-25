@@ -305,7 +305,6 @@ def plan_path_to_franka(gym, sim, device, env_ptr, root_state, robot_handle, box
                 path.append(box_center_3d)
 
             X_dimensions = np.array([(-6, 6), (-10, 10)])
-            # plot_obstacles(X_dimensions, obstacles, robot_pos, push_target, path)
             return path
 
     X_dimensions = np.array([(-6, 6), (-10, 10)]) 

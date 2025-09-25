@@ -803,10 +803,8 @@ class LLMManager:
             if hasattr(self.task, 'component_completion_status'):
                 if 'left wheel' in str(component_name).lower() or 'left_wheel' in str(component_name).lower():
                     self.task.component_completion_status['left_wheel_picked'] = True
-                    print(f"✅ Marked left wheel as picked in completion status")
                 elif 'right wheel' in str(component_name).lower() or 'right_wheel' in str(component_name).lower():
                     self.task.component_completion_status['right_wheel_picked'] = True
-                    print(f"✅ Marked right wheel as picked in completion status")
             
             # Check if task is completed
             self.check_task_completion()

@@ -7,7 +7,7 @@
 
 
 <div style="text-align: center;">
-    <img src="assets/CLiMRS.png" alt="Teaser" width=100% >
+    <img src="teaser/CLiMRS.png" alt="Teaser" width=100% >
 </div>
 
 
