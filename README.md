@@ -52,6 +52,5 @@ export LD_LIBRARY_PATH=/path/to/conda/envs/your_env/lib
 
 ```bash
 conda activate climrs
-export PYTHONPATH=/home/xuanbingxie/Desktop/AIcarrier_cursor:$PYTHONPATH
 python climrs/run.py
 ```

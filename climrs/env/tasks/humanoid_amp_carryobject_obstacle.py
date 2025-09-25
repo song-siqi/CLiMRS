@@ -274,7 +274,7 @@ class LLMManager:
                             component_status_info = "\nComponent Check Status:\n"
                             for component, status in self.task.component_check_status.items():
                                 if status['checked']:
-                                    status_str = "✅ READY" if status['available'] else "❌ NOT_READY"
+                                    status_str = "READY" if status['available'] else "NOT_READY"
                                     component_status_info += f"- {component}: {status_str}\n"
                                 else:
                                     component_status_info += f"- {component}: ⏳ NOT_CHECKED\n"
@@ -283,7 +283,7 @@ class LLMManager:
                         if hasattr(self, 'task') and hasattr(self.task, 'latest_parallel_results') and self.task.latest_parallel_results:
                             parallel_results_info = "\nLatest Parallel Results:\n"
                             for result in self.task.latest_parallel_results[-3:]:  
-                                status_icon = "✅" if result.get('result', False) else "❌"
+                                status_icon = "" if result.get('result', False) else ""
                                 parallel_results_info += f"{status_icon} {result.get('action', 'Unknown')}\n"
                             
                         agent_obs = {
@@ -816,15 +816,12 @@ class LLMManager:
         if hasattr(self.task, 'experiment_stats'):
             stats = self.task.experiment_stats
             
-            # Check if all stages have reached expected goals
-            # Assume task goal is to assemble 2 wheels onto trunk
             if (stats['stage_progress']['pick_completed'] >= 2 and 
                 stats['stage_progress']['check_completed'] >= 3):
                 
                 if not stats['task_completed']:
                     stats['task_completed'] = True
-                    
-                    # Auto-save final results
+
                     json_path, txt_path = self.save_experiment_results(auto_save=False)
                 
                 return True
@@ -861,7 +858,7 @@ class LLMManager:
         for component, status in check_status.items():
             if status.get('checked', False):
                 availability = "READY" if status.get('available', False) else "NOT_READY"
-                check_summary.append(f"✅ {component}: {availability}")
+                check_summary.append(f"{component}: {availability}")
                 checked_components.append(component)
         
         if check_summary:

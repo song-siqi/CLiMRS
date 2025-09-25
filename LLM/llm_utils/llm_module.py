@@ -94,7 +94,6 @@ class Agent:
                 print("Response text:", response.text)
         else:
             print("Empty response body")
-        # import pdb; pdb.set_trace()
         
         response = response.json()
 

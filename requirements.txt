@@ -10,3 +10,4 @@ pybullet
 rtree
 plotly
 matplotlib
+requests

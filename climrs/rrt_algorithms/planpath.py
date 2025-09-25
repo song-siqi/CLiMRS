@@ -1,26 +1,4 @@
-def preprocess_corner_path(path, extra_dist=0.3):
-    """
-    Preprocess corners in axis-aligned paths:
-    If the last segment is a turn (i.e., the second-to-last and last segments have different directions),
-    add a preparation point before the turn (move extra_dist in the direction before the turn).
-    """
-    if len(path) < 3:
-        return path
-    p1 = np.array(path[-3])
-    p2 = np.array(path[-2])
-    p3 = np.array(path[-1])
-    dir1 = p2 - p1
-    dir2 = p3 - p2
-    # Determine if this is a turn (direction change)
-    if not np.allclose(dir1/np.linalg.norm(dir1), dir2/np.linalg.norm(dir2), atol=1e-2):
-        # Move extra_dist in the direction before point p2
-        prep = p2 + (dir1/np.linalg.norm(dir1)) * extra_dist
-        # If prep is closer to p3 than p2, moving extra would overshoot the target, skip
-        if np.linalg.norm(prep - p3) < np.linalg.norm(p2 - p3):
-            return path
-        new_path = path[:-2] + [prep, p2, p3]
-        return new_path
-    return path
+
 import torch
 import numpy as np
 from rrt_algorithms.rrt.rrt_star_bid import RRTStarBidirectional
@@ -28,6 +6,8 @@ from rrt_algorithms.search_space.search_space import SearchSpace
 from rrt_algorithms.utilities.plotting import Plot
 import matplotlib.pyplot as plt
 from isaacgym import gymapi, gymtorch
+
+
 
 def plot_obstacles(X_dimensions, obstacles, start, goal, path=None):
     fig, ax = plt.subplots()

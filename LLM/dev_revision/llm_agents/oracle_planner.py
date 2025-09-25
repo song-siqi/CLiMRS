@@ -74,11 +74,6 @@ class OraclePlanner(object):
                     # "top_p": 1.0,
                     "n": args.n
                 }
-            # self.device = args.device
-            # self.lm_id = args.lm_id
-            # self.chat = True
-            # self.llm_module = Agent(model=self.lm_id, device=self.device)
-            # self.sampling_params['model'] = self.lm_id
 
         def lm_engine(source, lm_id, device):
 
