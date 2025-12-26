@@ -1,4 +1,4 @@
-# CLiMRS: Cooperative Large-Language-Model-Driven Heterogeneous Multi-Robot System
+# Leveraging Adaptive Group Negotiation for Heterogeneous Multi-Robot Collaboration with Large Language Models
 
 <div align="center">
 
